@@ -1,0 +1,92 @@
+{
+  "SettingsVersion": 1.2,
+  "SimMode": "Multirotor",
+  "ApiServerPort": 41451,
+  "LocalHostIp": "127.0.0.1",
+  "Wind": { "X": 0.1, "Y": 0, "Z": 0 },
+  "CameraDefaults": {
+    "NoiseSettings": [
+      {
+        "Enabled": "NOISE",
+        "ImageType": 0,
+        "RandContrib": 0.1,
+        "RandSpeed": 100.0,
+        "RandSize": 500.0,
+        "RandDensity": 100,
+        
+        "HorzWaveContrib": 0.5,
+        "HorzWaveStrength": 0.01,
+        "HorzWaveVertSize": 1.0,
+        "HorzWaveScreenSize": 1.0,
+        
+        "HorzNoiseLinesContrib": 0.9,
+        "HorzNoiseLinesDensityY": 0.3,
+        "HorzNoiseLinesDensityXY": 0.8,
+        
+        "HorzDistortionContrib": 0.8,
+        "HorzDistortionStrength": 0.00002
+       }
+    ]
+  },
+  "Vehicles": {
+    "Drone1": {
+      "VehicleType": "SimpleFlight",
+      "AutoCreate": true,
+      "Cameras": {
+        "Camera1": {
+          "CaptureSettings": [
+            {
+              "ImageType": 0,
+              "Width": "IMG_W",
+              "Height": "IMG_H",
+              "FOV_Degrees": 83
+            },
+            {
+              "ImageType": 1,
+              "Width": "IMG_W",
+              "Height": "IMG_H",
+              "ZFar": 100
+            }
+          ],
+          "X": 0.2,
+          "Y": -0.2,
+          "Z": -0.2,
+          "Pitch": 0,
+          "Roll": 0,
+          "Yaw": 0
+        },
+        "Camera2": {
+          "CaptureSettings": [
+            {
+              "ImageType": 0,
+              "Width": "IMG_W",
+              "Height": "IMG_H",
+              "FOV_Degrees": 83
+            }
+          ],
+          "X": 0.2,
+          "Y": 0.2,
+          "Z": -0.2,
+          "Pitch": 0,
+          "Roll": 0,
+          "Yaw": 0
+        }
+      },
+      "Sensors": {
+        "Lidar1": {
+          "SensorType": 6,
+          "Enabled": true,
+          "NumberOfChannels": 16,
+          "PointsPerSecond": 10000,
+          "HorizontalRotationResolution": 0.5,
+          "RotationsPerSecond": 10,
+          "DrawDebugPoints": false
+        },
+        "Imu1": {
+          "SensorType": 2,
+          "Enabled": true
+        }
+      }
+    }
+  }
+}

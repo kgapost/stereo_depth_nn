@@ -1,0 +1,39 @@
+# ===== Python =====
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# ===== Virtual envs =====
+stereo_env/
+venv/
+
+# ===== Training output =====
+runs/
+logs/
+*.pth
+*.pt
+*.onnx
+
+# ===== Datasets (recorded or downloaded - never commit these) =====
+*.npy
+*.npz
+datasets/
+
+# ===== Captured / preview media =====
+*.mp4
+*.avi
+*.mov
+*.png
+*.jpg
+*.jpeg
+
+# ===== AirSim binaries (installed separately, see README) =====
+AirSim/
+AirSim_Binary/
+
+# ===== Editor / OS cruft =====
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

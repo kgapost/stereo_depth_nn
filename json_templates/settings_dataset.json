@@ -1,0 +1,136 @@
+{
+  "SettingsVersion": 1.2,
+  "SimMode": "Multirotor",
+  "ApiServerPort": 41451,
+  "LocalHostIp": "127.0.0.1",
+  "Wind": { "X": 0.1, "Y": 0, "Z": 0 },
+  "CameraDefaults": {
+    "NoiseSettings": [
+      {
+        "Enabled": false,
+        "ImageType": 0,
+        "RandContrib": 0.1,
+        "RandSpeed": 100.0,
+        "RandSize": 500.0,
+        "RandDensity": 100,
+
+        "HorzWaveContrib": 0.5,
+        "HorzWaveStrength": 0.01,
+        "HorzWaveVertSize": 1.0,
+        "HorzWaveScreenSize": 1.0,
+
+        "HorzNoiseLinesContrib": 0.9,
+        "HorzNoiseLinesDensityY": 0.3,
+        "HorzNoiseLinesDensityXY": 0.8,
+
+        "HorzDistortionContrib": 0.8,
+        "HorzDistortionStrength": 0.00002
+       }
+    ]
+  },
+  "Vehicles": {
+    "Drone1": {
+      "VehicleType": "SimpleFlight",
+      "AutoCreate": true,
+      "Cameras": {
+        "Camera1": {
+          "_comment": "left / reference camera - Scene + DepthPlanar ground truth. Y=0 so every right camera's Y offset below IS its baseline in meters.",
+          "CaptureSettings": [
+            {
+              "ImageType": 0,
+              "Width": 1024,
+              "Height": 768,
+              "FOV_Degrees": 83
+            },
+            {
+              "ImageType": 1,
+              "Width": 1024,
+              "Height": 768,
+              "ZFar": 100
+            }
+          ],
+          "X": 0.2,
+          "Y": 0.0,
+          "Z": -0.2,
+          "Pitch": 0,
+          "Roll": 0,
+          "Yaw": 0
+        },
+        "Camera2": {
+          "_comment": "baseline 6.0 cm - this project's REAL onboard stereo rig (Waveshare/Seeed IMX219-83 datasheet: Baseline Length 60mm; PAPER.md 2.5)",
+          "CaptureSettings": [
+            {
+              "ImageType": 0,
+              "Width": 1024,
+              "Height": 768,
+              "FOV_Degrees": 83
+            }
+          ],
+          "X": 0.2,
+          "Y": 0.06,
+          "Z": -0.2,
+          "Pitch": 0,
+          "Roll": 0,
+          "Yaw": 0
+        },
+        "Camera3": {
+          "_comment": "baseline 9.5 cm - Intel RealSense D455",
+          "CaptureSettings": [
+            {
+              "ImageType": 0,
+              "Width": 1024,
+              "Height": 768,
+              "FOV_Degrees": 83
+            }
+          ],
+          "X": 0.2,
+          "Y": 0.095,
+          "Z": -0.2,
+          "Pitch": 0,
+          "Roll": 0,
+          "Yaw": 0
+        },
+        "Camera4": {
+          "_comment": "baseline 12 cm - StereoLabs ZED / ZED 2, FLIR Bumblebee2",
+          "CaptureSettings": [
+            {
+              "ImageType": 0,
+              "Width": 1024,
+              "Height": 768,
+              "FOV_Degrees": 83
+            }
+          ],
+          "X": 0.2,
+          "Y": 0.12,
+          "Z": -0.2,
+          "Pitch": 0,
+          "Roll": 0,
+          "Yaw": 0
+        },
+        "Camera5": {
+          "_comment": "baseline 24 cm - FLIR Bumblebee XB3 wide-baseline mode; extends usable range beyond the closer-spaced pairs instead of duplicating the 6cm real rig",
+          "CaptureSettings": [
+            {
+              "ImageType": 0,
+              "Width": 1024,
+              "Height": 768,
+              "FOV_Degrees": 83
+            }
+          ],
+          "X": 0.2,
+          "Y": 0.24,
+          "Z": -0.2,
+          "Pitch": 0,
+          "Roll": 0,
+          "Yaw": 0
+        }
+      },
+      "Sensors": {
+        "Imu1": {
+          "SensorType": 2,
+          "Enabled": true
+        }
+      }
+    }
+  }
+}
