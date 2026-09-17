@@ -159,7 +159,8 @@ def run_window(model, args, batch, device, train=True, criterion=None):
             out = model(left, right, batch["K"], batch["fxb"],
                         state=state, rel_pose=rel)
             state = out["state"]
-        elif args.model == "stereoconv":
+        elif args.model in ("stereoconv", "baseline_fxb", "mobilenet_fxb",
+                           "anynet_fxb", "yolo_fxb"):
             out = model(left, right, batch["fxb"])
         else:
             out = model(left, right)

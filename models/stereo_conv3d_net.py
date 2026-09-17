@@ -17,7 +17,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .common import (gwc_volume, soft_argmin, CostAggregation3D,
-                     DisparityRefinement, upsample_disp)
+                     DisparityRefinement, FxbConditioning, upsample_disp)
 
 
 def conv3d_bn_relu(in_ch, out_ch, spatial_stride, time_stride):
@@ -41,22 +41,6 @@ class Siamese3DEncoder(nn.Module):
 
     def forward(self, x):
         return self.down8(self.down4(self.stem(x)))   # (B, ch, T', H/8, W/8)
-
-
-class FxbConditioning(nn.Module):
-    """Concatenates `fxb` as a constant feature map and projects back to `ch`
-    channels - the same "condition on the calibration scalar" idea as
-    `StereoConvNet` (Section 6), applied here at the collapsed-temporal
-    bottleneck instead of a 2D U-Net bottleneck."""
-
-    def __init__(self, ch):
-        super().__init__()
-        self.proj = nn.Sequential(nn.Conv2d(ch + 1, ch, 1, bias=False),
-                                  nn.BatchNorm2d(ch), nn.ReLU(inplace=True))
-
-    def forward(self, f, fxb):
-        fxb_map = (fxb / 100.0).view(-1, 1, 1, 1).expand(-1, 1, *f.shape[2:])
-        return self.proj(torch.cat([f, fxb_map], 1))
 
 
 class StereoConv3DNet(nn.Module):

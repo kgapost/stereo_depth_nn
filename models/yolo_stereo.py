@@ -46,8 +46,8 @@ import yaml
 from ultralytics.nn.modules import Conv
 from ultralytics.nn.tasks import parse_model
 
-from .common import (CostAggregation3D, DisparityRefinement, gwc_volume,
-                     soft_argmin, upsample_disp)
+from .common import (CostAggregation3D, DisparityRefinement, FxbConditioning,
+                     gwc_volume, soft_argmin, upsample_disp)
 
 _YAML = os.path.join(os.path.dirname(__file__), "yolo26_stereo.yaml")
 
@@ -79,6 +79,7 @@ class YoloStereoNet(nn.Module):
         self.save = set(save) | {_P3_BACKBONE, *_NECK_OUT}
 
         p3_ch, neck_ch = self._probe_channels()
+        self.p3_ch = p3_ch  # exposed for YoloStereoNetFxb
         assert p3_ch % groups == 0, (
             f"P3 has {p3_ch} channels, not divisible by groups={groups}")
 
@@ -159,6 +160,51 @@ class YoloStereoNet(nn.Module):
         out = self.inject(torch.cat([out, disp8 / self.max_disp], 1))
 
         residual = self.head(out)                                  # (B,1,H/4,W/4)
+        disp4 = upsample_disp(disp8, 2) * torch.exp(residual.clamp(-1.0, 1.0))
+        disp = upsample_disp(disp4, 4)
+        if self.refine is not None:
+            disp = self.refine(disp, left)
+
+        return {"disp": disp, "aux": [(disp8, 8), (disp4, 4)]}
+
+
+class YoloStereoNetFxb(YoloStereoNet):
+    """YoloStereoNet conditioned on fxb (focal x baseline), applied to the P3
+    backbone features before the cost volume - the same injection point
+    FastStereoNetFxb/MobileStereoNetFxb use, just at YOLO26's P3 width."""
+
+    def __init__(self, max_disp=128, scale="n", groups=8, c_mid=64,
+                 full_res_refine=True):
+        super().__init__(max_disp=max_disp, scale=scale, groups=groups,
+                         c_mid=c_mid, full_res_refine=full_res_refine)
+        self.condition = FxbConditioning(self.p3_ch)
+
+    def forward(self, left, right, fxb):
+        h, w = left.shape[-2:]
+        if h % 32 or w % 32:
+            raise ValueError(
+                f"YoloStereoNet needs image sizes that are multiples of 32 "
+                f"(the backbone reaches 1/32), got {h}x{w}. The other models "
+                f"only need multiples of 16, so a --crop that works for them "
+                f"may not work here; 480x640 and 256x448 both do.")
+
+        yl = self._run(left, len(self.layers))
+        yr = self._run(right, _RIGHT_LAYERS)
+        f8l, f8r = yl[_P3_BACKBONE], yr[_P3_BACKBONE]
+        f8l, f8r = self.condition(f8l, fxb), self.condition(f8r, fxb)
+
+        vol = gwc_volume(f8l, f8r, self.num_disp8, self.groups)
+        disp8 = soft_argmin(self.aggregation(vol)) * self.STRIDE
+
+        feats = [self.proj[i](yl[j]) for i, j in enumerate(_NECK_OUT)]
+        out = feats[-1]
+        for i in range(len(feats) - 2, -1, -1):
+            out = F.interpolate(out, scale_factor=2, mode="bilinear",
+                                align_corners=True)
+            out = self.fuse[i](out + feats[i])
+        out = self.inject(torch.cat([out, disp8 / self.max_disp], 1))
+
+        residual = self.head(out)
         disp4 = upsample_disp(disp8, 2) * torch.exp(residual.clamp(-1.0, 1.0))
         disp = upsample_disp(disp4, 4)
         if self.refine is not None:

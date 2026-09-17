@@ -8,7 +8,8 @@ refinement at full resolution. No temporal information.
 import torch.nn as nn
 
 from .common import (FeatureExtractor, gwc_volume, soft_argmin,
-                     CostAggregation3D, DisparityRefinement, upsample_disp)
+                     CostAggregation3D, DisparityRefinement, FxbConditioning,
+                     upsample_disp)
 
 
 class FastStereoNet(nn.Module):
@@ -30,6 +31,30 @@ class FastStereoNet(nn.Module):
         vol = gwc_volume(fl8, fr8, self.num_disp8, self.groups)
         cost = self.aggregation(vol)
         disp8 = soft_argmin(cost) * self.STRIDE          # full-res units, 1/8 grid
+        disp_up = upsample_disp(disp8, self.STRIDE)
+        disp = self.refine(disp_up, left)
+        return {"disp": disp, "aux": [(disp8, self.STRIDE)]}
+
+
+class FastStereoNetFxb(FastStereoNet):
+    """FastStereoNet conditioned on fxb (focal x baseline): the same
+    FxbConditioning block StereoConv3DNet uses (common.py), applied to the
+    siamese features before the cost volume is built. Lets one trained model
+    generalise across whatever baseline is given at inference, instead of
+    being implicitly tied to the training data's baseline."""
+
+    def __init__(self, max_disp=128, feat_ch=32, groups=8):
+        super().__init__(max_disp=max_disp, feat_ch=feat_ch, groups=groups)
+        self.condition = FxbConditioning(feat_ch)
+
+    def forward(self, left, right, fxb):
+        _, fl8 = self.features(left)
+        _, fr8 = self.features(right)
+        fl8 = self.condition(fl8, fxb)
+        fr8 = self.condition(fr8, fxb)
+        vol = gwc_volume(fl8, fr8, self.num_disp8, self.groups)
+        cost = self.aggregation(vol)
+        disp8 = soft_argmin(cost) * self.STRIDE
         disp_up = upsample_disp(disp8, self.STRIDE)
         disp = self.refine(disp_up, left)
         return {"disp": disp, "aux": [(disp8, self.STRIDE)]}

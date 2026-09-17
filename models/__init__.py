@@ -1,15 +1,17 @@
-from .baseline_net import FastStereoNet
+from .baseline_net import FastStereoNet, FastStereoNetFxb
 from .stereo_conv_net import StereoConvNet
 from .stereo_conv3d_net import StereoConv3DNet
 from .temporal_net import TempoBandNet
-from .mobilenet_stereo import MobileStereoNet
-from .anynet_stereo import AnyStereoNet
+from .mobilenet_stereo import MobileStereoNet, MobileStereoNetFxb
+from .anynet_stereo import AnyStereoNet, AnyStereoNetFxb
 from .common import count_parameters, upsample_disp
 
 
 def build_model(name, max_disp=128, **kw):
     if name == "baseline":
         return FastStereoNet(max_disp=max_disp)
+    if name == "baseline_fxb":
+        return FastStereoNetFxb(max_disp=max_disp)
     if name == "stereoconv":
         return StereoConvNet(max_disp=max_disp)
     if name in ("stereoconv3d", "stereoconv3d_fast"):
@@ -21,8 +23,12 @@ def build_model(name, max_disp=128, **kw):
         return TempoBandNet(max_disp=max_disp)
     if name == "mobilenet":
         return MobileStereoNet(max_disp=max_disp)
+    if name == "mobilenet_fxb":
+        return MobileStereoNetFxb(max_disp=max_disp)
     if name == "anynet":
         return AnyStereoNet(max_disp=max_disp)
+    if name == "anynet_fxb":
+        return AnyStereoNetFxb(max_disp=max_disp)
     if name == "yolo":
         # Imported lazily: this is the only model that needs ultralytics, and
         # training any of the others should not require it to be installed.
@@ -30,4 +36,9 @@ def build_model(name, max_disp=128, **kw):
         return YoloStereoNet(max_disp=max_disp,
                              scale=kw.get("yolo_scale", "n"),
                              full_res_refine=kw.get("yolo_refine", True))
+    if name == "yolo_fxb":
+        from .yolo_stereo import YoloStereoNetFxb
+        return YoloStereoNetFxb(max_disp=max_disp,
+                                scale=kw.get("yolo_scale", "n"),
+                                full_res_refine=kw.get("yolo_refine", True))
     raise ValueError(f"unknown model '{name}'")

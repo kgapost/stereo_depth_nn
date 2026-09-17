@@ -28,7 +28,7 @@
 # so run them with stereo_depth_nn as the working directory.
 # ============================================================================
 
-tartanair
+tartanair==1.4.0
 # this will take care of pytorch, opencv, numpy etc.
-tensorboard
-ultralytics                   # --model yolo only (AGPL-3.0; see header)
+tensorboard==2.21.0
+ultralytics==8.4.151          # --model yolo only (AGPL-3.0; see header)

@@ -200,6 +200,23 @@ class DisparityRefinement(nn.Module):
         return F.relu(disp + self.out(self.blocks(self.head(x))))
 
 
+class FxbConditioning(nn.Module):
+    """Concatenates `fxb` (focal length x baseline) as a constant feature map
+    and projects back to `ch` channels - lets a model be conditioned on
+    whatever stereo baseline is given at inference, instead of implicitly
+    tying it to whatever baseline the training data used. Applied to siamese
+    left/right features right after extraction, before matching."""
+
+    def __init__(self, ch):
+        super().__init__()
+        self.proj = nn.Sequential(nn.Conv2d(ch + 1, ch, 1, bias=False),
+                                  nn.BatchNorm2d(ch), nn.ReLU(inplace=True))
+
+    def forward(self, f, fxb):
+        fxb_map = (fxb / 100.0).view(-1, 1, 1, 1).expand(-1, 1, *f.shape[2:])
+        return self.proj(torch.cat([f, fxb_map], 1))
+
+
 def upsample_disp(disp, scale):
     """Bilinear spatial upsample; values stay in full-res units (no rescale)."""
     return F.interpolate(disp, scale_factor=scale, mode="bilinear", align_corners=False)

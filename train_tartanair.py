@@ -43,10 +43,11 @@ Examples:
     # grid search: sweep --grid-models x --grid-bs x --grid-lr x --grid-loss,
     # each combo a fresh subprocess (so a CUDA OOM in one can't corrupt the
     # next), skipping combos already completed by an earlier interrupted sweep
-    # and resuming ones that stopped part-way. The defaults are the full
-    # comparison - 5 models x bs {8,16} x lr {1e-3,3e-3,1e-2} x 4 losses,
-    # minus the combos measured not to fit in 24GB - so this is the whole
-    # command:
+    # and resuming ones that stopped part-way. The defaults are a model x loss
+    # comparison at the bs/lr values earlier sweeps (runs/tartanair_grid)
+    # already settled on - all twelve models x bs=16 x lr=1e-3 x
+    # loss={smoothl1,logl1,hybrid}, minus the combos measured not to fit in
+    # 24GB - so this is the whole command:
     python train_tartanair.py --grid-search --data ~/datasets/tartanair \
         --amp --out runs/tartanair_grid
 
@@ -89,8 +90,9 @@ from losses import LOSS_CHOICES, add_loss_args
 from train import fit, sequence_split, log_exception, _now
 from models import build_model, count_parameters
 
-MODEL_CHOICES = ["baseline", "stereoconv", "stereoconv3d", "stereoconv3d_fast",
-                 "temporal", "mobilenet", "anynet", "yolo"]
+MODEL_CHOICES = ["baseline", "baseline_fxb", "stereoconv", "stereoconv3d",
+                 "stereoconv3d_fast", "temporal", "mobilenet", "mobilenet_fxb",
+                 "anynet", "anynet_fxb", "yolo", "yolo_fxb"]
 # depth26 stays a valid --loss/--grid-loss choice (LOSS_CHOICES, losses.py),
 # but is no longer swept by default: every combo tried so far gave far worse
 # EPE and depth MAE than the other three losses (its SILog term is
@@ -355,7 +357,12 @@ def _lan_ip():
 # baseline 0.34, anynet 0.33, mobilenet 0.60, yolo ~0.39, temporal 1.41 GB.
 # temporal is ~4x the rest purely because window=4 backprops through 4 frames.
 _GB_PER_SAMPLE = {"baseline": 0.34, "anynet": 0.33, "mobilenet": 0.60,
-                  "yolo": 0.39, "temporal": 1.41}
+                  "yolo": 0.39, "temporal": 1.41,
+                  # _fxb variants add one 1x1-conv conditioning block each -
+                  # negligible extra activations vs. the parent architecture,
+                  # so the same measured per-sample cost applies.
+                  "baseline_fxb": 0.34, "anynet_fxb": 0.33,
+                  "mobilenet_fxb": 0.60, "yolo_fxb": 0.39}
 # The log-space losses build multi-scale gradient tensors on top of the model's
 # own activations; measured to push temporal bs=16 from 22.5GB over the 24GB
 # edge, so they carry a surcharge when deciding feasibility.
@@ -984,62 +991,64 @@ def main():
                          "and is skipped on a re-run if already complete.")
     ap.add_argument("--grid-models", nargs="+", default=MODEL_CHOICES,
                     choices=MODEL_CHOICES,
-                    help="default is all eight models, yolo included. yolo "
-                         "needs ultralytics installed (imported lazily, only "
-                         "for this model); pass --grid-models without it to "
-                         "exclude it, e.g. on a machine without that "
-                         "dependency")
-    ap.add_argument("--grid-bs", nargs="+", type=int, default=[8, 16],
+                    help="default is all twelve models, yolo included. The "
+                         "'_fxb' variants (baseline_fxb, mobilenet_fxb, "
+                         "anynet_fxb, yolo_fxb) additionally take fxb (focal "
+                         "x baseline) as a network input, conditioning the "
+                         "siamese features on it before matching, so one "
+                         "trained model can generalise across whatever "
+                         "stereo baseline it is given at inference - the "
+                         "same idea stereoconv/stereoconv3d/temporal already "
+                         "use (see models/common.py FxbConditioning). yolo "
+                         "and yolo_fxb need ultralytics installed (imported "
+                         "lazily, only for these models); pass --grid-models "
+                         "without them to exclude it, e.g. on a machine "
+                         "without that dependency")
+    ap.add_argument("--grid-bs", nargs="+", type=int, default=[16],
                     help="ascending, so the cheapest (and least OOM-prone) "
                          "combos report first. Measured peak VRAM at 480x640 "
                          "with --amp: baseline/anynet ~2.7/5.5/11GB, mobilenet "
                          "~4.8/9.5/19GB, temporal ~11/22.5GB and OOM at 32 "
                          "(its window=4 backprop is ~4x the activations); yolo "
                          "3.1GB at bs=8 measured, so ~6/12GB at 16/32 on the "
-                         "linear scaling the other rows show.")
-    ap.add_argument("--grid-lr", nargs="+", default=["1e-3", "3e-3"],
-                    help="log-spaced ~3x apart, biased high: on capped data a "
-                         "short sweep is step-starved, so under-fitting is the "
-                         "real risk rather than divergence (AdamW + grad-clip "
-                         "1.0 + cosine keeps even 3e-3 tractable). 3e-4 was "
-                         "dropped after losing to 1e-3 in every trial run. "
-                         "1e-2 was added after the first full sweep "
-                         "(runs/tartanair_grid) came back with 3e-3 winning "
-                         "outright - top rank overall (temporal, bs=8, "
-                         "logl1) and the best score for several other "
-                         "model/loss combos - with 3e-3 sitting at the top "
-                         "of the range tested, and a winner on the boundary "
-                         "means the optimum was never bracketed. It was then "
-                         "dropped again once actually measured: across every "
-                         "combo tried, 1e-2 had the worst average EPE and "
-                         "depth MAE of the three rates and placed in zero of "
-                         "the top 10 results by depth MAE - the extra ~3x "
-                         "step turned out to be past the optimum, not "
-                         "short of it. Kept as literal strings (not parsed "
-                         "to float) so run directory names match exactly "
-                         "what you typed")
+                         "linear scaling the other rows show. Defaults to just "
+                         "16 - the earlier bs{8,16} sweep (runs/tartanair_grid) "
+                         "showed bs=16 winning or tying bs=8 across models, so "
+                         "the model-comparison sweep no longer needs to pay "
+                         "for both.")
+    ap.add_argument("--grid-lr", nargs="+", default=["1e-3"],
+                    help="defaults to just 1e-3 now that a model-comparison "
+                         "sweep is the point rather than an lr search: the "
+                         "earlier lr sweep (runs/tartanair_grid) tried "
+                         "3e-4/1e-3/3e-3/1e-2 and 1e-2 came back with the "
+                         "worst average EPE and depth MAE of the rates tried "
+                         "and zero top-10 results by depth MAE; 3e-3 briefly "
+                         "looked best on one early pass but lost once "
+                         "measured across every model/loss combo. Pass "
+                         "multiple values to re-run an lr comparison, e.g. "
+                         "`--grid-lr 1e-3 3e-3`. Kept as literal strings (not "
+                         "parsed to float) so run directory names match "
+                         "exactly what you typed")
     ap.add_argument("--grid-loss", nargs="+",
                     default=GRID_LOSS_DEFAULT,
                     choices=LOSS_CHOICES,
-                    help="fourth sweep axis: smoothl1, logl1, hybrid by "
-                         "default. smoothl1 is the control (every earlier "
-                         "run is comparable to it), logl1 the log-space "
-                         "objective aimed at the depth metrics, hybrid the "
-                         "combination of the two - so if smoothl1 wins the "
-                         "near field and logl1 the far field, hybrid is "
-                         "where that shows up. depth26 (a faithful port of "
+                    help="fourth sweep axis: defaults to smoothl1, logl1 and "
+                         "hybrid (GRID_LOSS_DEFAULT in this file) - the "
+                         "disparity-space control, the log-space objective "
+                         "aimed at the depth metrics obstacle avoidance "
+                         "actually needs, and their combination (losses.py). "
+                         "depth26 (a faithful port of "
                          "the loss YOLO26-depth trains with: SILog + "
-                         "multi-scale gradient matching) is excluded by "
-                         "default: every combo tried gave far worse EPE and "
+                         "multi-scale gradient matching) is left out: every "
+                         "combo tried gave far worse EPE and "
                          "depth MAE than the other three losses, confirming "
                          "its scale-invariant SILog term is the wrong choice "
                          "here, where stereo's fxb already gives true metric "
-                         "scale (losses.py). Pass `--grid-loss ... depth26` "
-                         "explicitly to include it anyway. The same losses "
-                         "are applied to every model, so a model comparison "
-                         "is not confounded by which objective each one "
-                         "happened to get. Runs using a non-default loss get "
-                         "a '_<loss>' directory suffix. train_loss is not "
+                         "scale (losses.py). The same loss(es) are applied to "
+                         "every model, so a model comparison is not "
+                         "confounded by which objective each one happened to "
+                         "get. Runs using a non-default loss get a "
+                         "'_<loss>' directory suffix. train_loss is not "
                          "comparable across losses, but val EPE / D1 / depth "
                          "MAE are.")
     ap.add_argument("--grid-epochs", type=int, default=20,

@@ -29,7 +29,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .common import (conv_bn_relu, ResBlock, gwc_volume, soft_argmin,
-                     DisparityRefinement, upsample_disp)
+                     DisparityRefinement, FxbConditioning, upsample_disp)
 
 
 class PyramidFeatures(nn.Module):
@@ -135,6 +135,35 @@ class AnyStereoNet(nn.Module):
 
         vol = gwc_volume(f16l, f16r, self.num_disp16, self.groups)
         disp16 = soft_argmin(self.cost16(vol)) * self.STRIDE      # full-res units
+        disp8 = self.stage8(f8l, f8r, upsample_disp(disp16, 2))
+        disp4 = self.stage4(f4l, f4r, upsample_disp(disp8, 2))
+        disp = self.refine(upsample_disp(disp4, 4), left)
+
+        return {"disp": disp, "aux": [(disp16, 16), (disp8, 8), (disp4, 4)]}
+
+
+class AnyStereoNetFxb(AnyStereoNet):
+    """AnyStereoNet conditioned on fxb (focal x baseline) at every pyramid
+    scale it matches at (1/16, 1/8, 1/4) - unlike the single-scale
+    FastStereoNetFxb/MobileStereoNetFxb, AnyNet's ResidualStages correlate raw
+    features directly at 1/8 and 1/4 too, not just the coarse disparity they
+    refine, so each scale needs its own conditioning to be fxb-aware."""
+
+    def __init__(self, max_disp=128, feat_ch=24, groups=8):
+        super().__init__(max_disp=max_disp, feat_ch=feat_ch, groups=groups)
+        self.cond16 = FxbConditioning(feat_ch)
+        self.cond8 = FxbConditioning(feat_ch)
+        self.cond4 = FxbConditioning(feat_ch)
+
+    def forward(self, left, right, fxb):
+        f4l, f8l, f16l = self.features(left)
+        f4r, f8r, f16r = self.features(right)
+        f16l, f16r = self.cond16(f16l, fxb), self.cond16(f16r, fxb)
+        f8l, f8r = self.cond8(f8l, fxb), self.cond8(f8r, fxb)
+        f4l, f4r = self.cond4(f4l, fxb), self.cond4(f4r, fxb)
+
+        vol = gwc_volume(f16l, f16r, self.num_disp16, self.groups)
+        disp16 = soft_argmin(self.cost16(vol)) * self.STRIDE
         disp8 = self.stage8(f8l, f8r, upsample_disp(disp16, 2))
         disp4 = self.stage4(f4l, f4r, upsample_disp(disp8, 2))
         disp = self.refine(upsample_disp(disp4, 4), left)
