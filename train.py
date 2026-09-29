@@ -1,16 +1,16 @@
-"""Train the baseline (FastStereoNet) or temporal (TempoBandNet) model.
+"""Train the siam2d_3dhg (FastStereoNet) or siam2d_egomotion_fxb (TempoBandNet) model.
 
 Examples:
-  # baseline, single frames
-  python train.py --model baseline --data ~/datasets/airsim_stereo --out runs/baseline
+  # siam2d_3dhg, single frames
+  python train.py --model siam2d_3dhg --data ~/datasets/airsim_stereo --out runs/siam2d_3dhg
 
-  # temporal, windows of 4 frames with ego-motion
-  python train.py --model temporal --window 4 --bs 4 --data ~/datasets/airsim_stereo \
-      --out runs/temporal --pose-noise 0.3
+  # siam2d_egomotion_fxb, windows of 4 frames with ego-motion
+  python train.py --model siam2d_egomotion_fxb --window 4 --bs 4 --data ~/datasets/airsim_stereo \
+      --out runs/siam2d_egomotion_fxb --pose-noise 0.3
 
   # log-space objective aimed at the depth metrics rather than disparity EPE
-  python train.py --model yolo --loss logl1 --data ~/datasets/airsim_stereo \
-      --out runs/yolo_logl1
+  python train.py --model yolo2d_3dhg --loss logl1 --data ~/datasets/airsim_stereo \
+      --out runs/yolo2d_3dhg_logl1
 
 Validation is held out by *sequence* (never by frame) to avoid leakage.
 
@@ -139,7 +139,7 @@ def run_window(model, args, batch, device, train=True, criterion=None):
         batch[k] = batch[k].to(device, non_blocking=True)
     T = batch["left"].shape[1]
 
-    if args.model in ("stereoconv3d", "stereoconv3d_fast"):
+    if args.model in ("c3d_3dhg_10_fxb", "c3d_3dhg_3_fxb"):
         # One forward call over the whole stacked window, not a per-frame
         # loop: the model consumes all T frames at once and predicts a
         # single disparity map for the last (current) one.
@@ -152,15 +152,15 @@ def run_window(model, args, batch, device, train=True, criterion=None):
     state, loss, m = None, 0.0, None
     for t in range(T):
         left, right = batch["left"][:, t], batch["right"][:, t]
-        if args.model == "temporal":
+        if args.model == "siam2d_egomotion_fxb":
             rel = batch["rel_pose"][:, t]
             if train and args.pose_noise > 0 and t > 0:
                 rel = perturb_poses(rel, args.pose_noise, args.pose_noise_trans)
             out = model(left, right, batch["K"], batch["fxb"],
                         state=state, rel_pose=rel)
             state = out["state"]
-        elif args.model in ("stereoconv", "baseline_fxb", "mobilenet_fxb",
-                           "anynet_fxb", "yolo_fxb"):
+        elif args.model in ("siam2d_2dun_fxb", "siam2d_3dhg_fxb", "mobile2d_3dhg_fxb",
+                           "pyr2d_casc2d_fxb", "yolo2d_3dhg_fxb"):
             out = model(left, right, batch["fxb"])
         else:
             out = model(left, right)
@@ -332,27 +332,29 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--data", nargs="+", required=True)
     ap.add_argument("--dataset", default="airsim", choices=["airsim", "tartanair"])
-    ap.add_argument("--model", default="baseline",
-                    choices=["baseline", "stereoconv", "stereoconv3d",
-                            "stereoconv3d_fast", "temporal", "mobilenet",
-                            "anynet", "yolo"])
+    ap.add_argument("--model", default="siam2d_3dhg",
+                    choices=["siam2d_3dhg", "siam2d_2dun_fxb", "c3d_3dhg_10_fxb",
+                            "c3d_3dhg_3_fxb", "siam2d_egomotion_fxb", "mobile2d_3dhg",
+                            "pyr2d_casc2d", "yolo2d_3dhg"])
     ap.add_argument("--out", default="runs/exp")
     ap.add_argument("--epochs", type=int, default=30)
     ap.add_argument("--bs", type=int, default=8)
     ap.add_argument("--lr", type=float, default=4e-4)
     ap.add_argument("--window", type=int, default=None,
-                    help="temporal window (default: 1 baseline, 4 temporal)")
+                    help="temporal window (default: 1 siam2d_3dhg, "
+                         "4 siam2d_egomotion_fxb)")
     ap.add_argument("--frame-stride", type=int, default=2,
                     help="gap between window frames (2 @10FPS => 0.2s of motion)")
     ap.add_argument("--crop", default=None,
-                    help="HxW random crop (multiple of 16; 32 for --model yolo)")
+                    help="HxW random crop (multiple of 16; 32 for --model yolo2d_3dhg)")
     ap.add_argument("--max-disp", type=int, default=128)
     add_loss_args(ap)
     ap.add_argument("--yolo-scale", default="n", choices=["n", "s", "m", "l", "x"],
-                    help="YOLO26 compound scale for --model yolo")
+                    help="YOLO26 compound scale for --model yolo2d_3dhg")
     ap.add_argument("--val-frac", type=float, default=0.15)
     ap.add_argument("--pose-noise", type=float, default=0.0,
-                    help="train-time rotation noise on rel poses, deg (temporal)")
+                    help="train-time rotation noise on rel poses, deg "
+                         "(siam2d_egomotion_fxb)")
     ap.add_argument("--pose-noise-trans", type=float, default=0.02)
     ap.add_argument("--workers", type=int, default=4)
     ap.add_argument("--amp", action="store_true")
@@ -380,8 +382,8 @@ def main():
     args = ap.parse_args()
 
     if args.window is None:
-        args.window = {"temporal": 4, "stereoconv3d": 10,
-                       "stereoconv3d_fast": 3}.get(args.model, 1)
+        args.window = {"siam2d_egomotion_fxb": 4, "c3d_3dhg_10_fxb": 10,
+                       "c3d_3dhg_3_fxb": 3}.get(args.model, 1)
     crop = tuple(int(x) for x in args.crop.split("x")) if args.crop else None
 
     device = "cuda" if torch.cuda.is_available() else "cpu"

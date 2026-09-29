@@ -1,8 +1,8 @@
 """Evaluate a checkpoint (accuracy per depth range) and benchmark latency.
 
-  python evaluate.py --ckpt runs/temporal/best.pth --model temporal \
+  python evaluate.py --ckpt runs/siam2d_egomotion_fxb/best.pth --model siam2d_egomotion_fxb \
       --data ~/datasets/airsim_stereo_test --dataset airsim
-  python evaluate.py --model baseline --bench          # latency only, no data
+  python evaluate.py --model siam2d_3dhg --bench          # latency only, no data
 """
 
 import argparse
@@ -19,8 +19,8 @@ DEPTH_RANGES = [(0.0, 10.0), (10.0, 30.0), (30.0, 95.0)]
 
 @torch.no_grad()
 def evaluate(model, loader, args, device):
-    is_temporal = args.model == "temporal"
-    is_stereoconv3d = args.model in ("stereoconv3d", "stereoconv3d_fast")
+    is_temporal = args.model == "siam2d_egomotion_fxb"
+    is_stereoconv3d = args.model in ("c3d_3dhg_10_fxb", "c3d_3dhg_3_fxb")
     sums = {"epe": 0.0, "d1": 0.0, "n": 0}
     range_sums = {r: [0.0, 0] for r in DEPTH_RANGES}  # abs-rel depth error
 
@@ -61,7 +61,7 @@ def evaluate(model, loader, args, device):
                             batch["K"], batch["fxb"], state=state,
                             rel_pose=batch["rel_pose"][:, t])
                 state = out["state"]
-            elif args.model == "stereoconv":
+            elif args.model == "siam2d_2dun_fxb":
                 out = model(batch["left"][:, t], batch["right"][:, t], batch["fxb"])
             else:
                 out = model(batch["left"][:, t], batch["right"][:, t])
@@ -78,7 +78,7 @@ def evaluate(model, loader, args, device):
 @torch.no_grad()
 def benchmark(model, args, device):
     h, w = (int(x) for x in args.size.split("x"))
-    is_stereoconv3d = args.model in ("stereoconv3d", "stereoconv3d_fast")
+    is_stereoconv3d = args.model in ("c3d_3dhg_10_fxb", "c3d_3dhg_3_fxb")
     if is_stereoconv3d:
         left = torch.randn(1, args.window, 3, h, w, device=device)
         right = torch.randn(1, args.window, 3, h, w, device=device)
@@ -92,15 +92,15 @@ def benchmark(model, args, device):
         left, right, K, fxb = left.half(), right.half(), K, fxb
 
     def run(state):
-        if args.model == "temporal":
+        if args.model == "siam2d_egomotion_fxb":
             rel = torch.eye(4, device=device).unsqueeze(0)
             return model(left, right, K, fxb, state=state, rel_pose=rel)
-        if args.model == "stereoconv" or is_stereoconv3d:
+        if args.model == "siam2d_2dun_fxb" or is_stereoconv3d:
             return model(left, right, fxb)
         return model(left, right)
 
-    state = run(None).get("state") if args.model == "temporal" else None
-    for _ in range(10):  # warmup (steady-state for temporal)
+    state = run(None).get("state") if args.model == "siam2d_egomotion_fxb" else None
+    for _ in range(10):  # warmup (steady-state for siam2d_egomotion_fxb)
         out = run(state)
     if device.startswith("cuda"):
         torch.cuda.synchronize()
@@ -120,19 +120,19 @@ def benchmark(model, args, device):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--ckpt", default=None)
-    ap.add_argument("--model", default="baseline",
-                    choices=["baseline", "stereoconv", "stereoconv3d",
-                            "stereoconv3d_fast", "temporal", "mobilenet",
-                            "anynet", "yolo"])
+    ap.add_argument("--model", default="siam2d_3dhg",
+                    choices=["siam2d_3dhg", "siam2d_2dun_fxb", "c3d_3dhg_10_fxb",
+                            "c3d_3dhg_3_fxb", "siam2d_egomotion_fxb", "mobile2d_3dhg",
+                            "pyr2d_casc2d", "yolo2d_3dhg"])
     ap.add_argument("--yolo-scale", default="n", choices=["n", "s", "m", "l", "x"],
-                    help="YOLO26 compound scale for --model yolo; must match "
-                         "the scale --ckpt was trained with")
+                    help="YOLO26 compound scale for --model yolo2d_3dhg; must "
+                         "match the scale --ckpt was trained with")
     ap.add_argument("--data", nargs="+", default=None)
     ap.add_argument("--dataset", default="airsim", choices=["airsim", "tartanair"])
     ap.add_argument("--window", type=int, default=None,
-                    help="window length for temporal/stereoconv3d evaluation "
-                         "(default: 8 temporal, 10 stereoconv3d, 3 "
-                         "stereoconv3d_fast, 1 otherwise)")
+                    help="window length for siam2d_egomotion_fxb/c3d_3dhg_*_fxb "
+                         "evaluation (default: 8 siam2d_egomotion_fxb, 10 "
+                         "c3d_3dhg_10_fxb, 3 c3d_3dhg_3_fxb, 1 otherwise)")
     ap.add_argument("--max-disp", type=int, default=128)
     ap.add_argument("--bs", type=int, default=4)
     ap.add_argument("--bench", action="store_true", help="run latency benchmark")
@@ -140,8 +140,8 @@ def main():
     ap.add_argument("--fp16", action="store_true")
     args = ap.parse_args()
     if args.window is None:
-        args.window = {"temporal": 8, "stereoconv3d": 10,
-                       "stereoconv3d_fast": 3}.get(args.model, 1)
+        args.window = {"siam2d_egomotion_fxb": 8, "c3d_3dhg_10_fxb": 10,
+                       "c3d_3dhg_3_fxb": 3}.get(args.model, 1)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model = build_model(args.model, max_disp=args.max_disp,
@@ -156,7 +156,7 @@ def main():
         benchmark(model, args, device)
     if args.data:
         window = args.window if args.model in (
-            "temporal", "stereoconv3d", "stereoconv3d_fast") else 1
+            "siam2d_egomotion_fxb", "c3d_3dhg_10_fxb", "c3d_3dhg_3_fxb") else 1
         ds = build_dataset(args.dataset, args.data, window=window,
                            frame_stride=1, window_stride=window,
                            augment=False, max_disp=args.max_disp)

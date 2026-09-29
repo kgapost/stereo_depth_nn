@@ -32,7 +32,7 @@ This README has two parts:
 python3 -m venv stereo_env
 ./stereo_env/bin/pip install -r requirements.txt
 ```
-This is a **separate, smaller** environment than the drone project's. It only needs PyTorch, OpenCV, NumPy, and (for the `yolo` model only) `ultralytics` - no ROS.
+This is a **separate, smaller** environment than the drone project's. It only needs PyTorch, OpenCV, NumPy, and (for the `yolo2d_3dhg` model only) `ultralytics` - no ROS.
 
 **3. Point at your AirSim binaries, if needed.** `utils_airsim.py` looks for an `AirSim` folder next to this repo by default. If your AirSim binaries live somewhere else, tell it where:
 ```bash
@@ -69,12 +69,12 @@ Eight models are available. All of them are already built and working - none are
 
 Train one model on data you collected in Step 1:
 ```bash
-python train.py --model baseline --data ~/datasets/airsim_stereo --out runs/baseline
+python train.py --model siam2d_3dhg --data ~/datasets/airsim_stereo --out runs/siam2d_3dhg
 ```
 
 Or train on the public TartanAir dataset instead:
 ```bash
-python train_tartanair.py --model temporal --data ~/datasets/tartanair --out runs/temporal
+python train_tartanair.py --model siam2d_egomotion_fxb --data ~/datasets/tartanair --out runs/siam2d_egomotion_fxb
 ```
 
 Both scripts take many more options, for example `--loss` (which training objective to use, see [Section 14, Loss Functions](#14-loss-functions)), `--bs` (batch size), and `--epochs`. To see the full list:
@@ -90,7 +90,7 @@ The complete argument reference is also written out in [Section 15.4](#154-comma
 
 ```bash
 python train_tartanair.py --grid-search --data ~/datasets/tartanair \
-    --grid-models baseline temporal mobilenet anynet \
+    --grid-models siam2d_3dhg siam2d_egomotion_fxb mobile2d_3dhg pyr2d_casc2d \
     --out runs/my_grid_search
 ```
 
@@ -99,12 +99,12 @@ Each combination trains as its own process, so one crashing (for example, runnin
 ## Step 3 - Check how good a trained model is
 
 ```bash
-python evaluate.py --ckpt runs/baseline/best.pth --model baseline --data ~/datasets/airsim_stereo_test
+python evaluate.py --ckpt runs/siam2d_3dhg/best.pth --model siam2d_3dhg --data ~/datasets/airsim_stereo_test
 ```
 
 This reports how far off the depth guess is - in pixels and in metres, split by distance (close / medium / far, since the same pixel error means a much bigger real-world error far away than it does up close). It can also measure how fast the model runs, e.g. on a Jetson:
 ```bash
-python evaluate.py --model baseline --bench --size 256x448 --fp16
+python evaluate.py --model siam2d_3dhg --bench --size 256x448 --fp16
 ```
 Full detail on what is measured and in what order is in [Section 15.2](#152-evaluation).
 
@@ -463,9 +463,9 @@ and the depth below which `--max-disp` cuts off, at the start of every run.
 The intended pipeline is pre-train here, fine-tune on the rig:
 
 ```bash
-python train_tartanair.py --model baseline --data ~/datasets/tartanair \
+python train_tartanair.py --model siam2d_3dhg --data ~/datasets/tartanair \
     --out runs/tartanair_pre
-python train.py --model baseline --data ~/datasets/airsim_stereo \
+python train.py --model siam2d_3dhg --data ~/datasets/airsim_stereo \
     --out runs/finetune --init runs/tartanair_pre/best.pth
 ```
 
@@ -681,7 +681,7 @@ and Section 11 `TempoBandNet`). All of them train and evaluate the same way
 | `StereoConvNet` | Section 6 | DispNetC-style 2D correlation + U-Net cost aggregation | 3.79 M | implemented |
 | `FastStereoNet` | Section 7 | Group-wise correlation + small 3D-conv hourglass + edge-aware refinement | 0.20 M | implemented |
 | `StereoConv3DNet` | Section 8 | C3D/I3D-style 3D convs over a 10-frame stacked volume | 0.15 M | implemented |
-| `StereoConv3DNet` (`stereoconv3d_fast`) | Section 9 | Same network, a 3-frame stacked volume instead of 10 | 0.15 M | implemented |
+| `StereoConv3DNet` (`c3d_3dhg_3_fxb`) | Section 9 | Same network, a 3-frame stacked volume instead of 10 | 0.15 M | implemented |
 | `MobileStereoNet` | Section 10.1 | Same pipeline, dense stages as MobileNetV2 inverted residuals | 0.13 M | implemented |
 | `AnyStereoNet` | Section 10.2 | No 3D convs: coarse-to-fine residual disparity bands, anytime output | 0.14 M | implemented |
 | `YoloStereoNet` | Section 10.3 | YOLO26 encoder/neck + multiplicative log-residual decoder | 2.61 M | implemented |
@@ -912,7 +912,7 @@ right frames [t-9..t] ──┘    (Conv3D+BN+ReLU, 3x3x3 kernels,        (C, T'
 ### 9. Proposed Method - Baseline Fast Approach with Temporal Data (StereoConv3DNet, T=3)
 
 **The same network as Section 8, just a shorter window.**
-`stereoconv3d_fast` ([models/stereo_conv3d_net.py](models/stereo_conv3d_net.py))
+`c3d_3dhg_3_fxb` ([models/stereo_conv3d_net.py](models/stereo_conv3d_net.py))
 has its own `--model` name, but it is *not* a second, different network -
 it is `StereoConv3DNet` given 3 stacked frames instead of 10. The 3D
 encoder already squashes down however many frames it's given into one
@@ -943,15 +943,15 @@ full 10-frame window.
 
 **Design notes**:
 
-- Registered as `stereoconv3d_fast` in [models/__init__.py](models/__init__.py)
+- Registered as `c3d_3dhg_3_fxb` in [models/__init__.py](models/__init__.py)
   and `MODEL_CHOICES` ([train_tartanair.py](train_tartanair.py)), so it is
-  included by default in `--grid-models` alongside `stereoconv3d`, and
+  included by default in `--grid-models` alongside `c3d_3dhg_10_fxb`, and
   compared directly in the same sweep (Section 15.3).
 - `--window` defaults to 3 for this model (`train.py`, `evaluate.py`,
   `train_tartanair.py`), the same way it already defaults to 10 for
-  `stereoconv3d` and 4 for `temporal` - no flag needed for the usual case.
+  `c3d_3dhg_10_fxb` and 4 for `siam2d_egomotion_fxb` - no flag needed for the usual case.
 - Since parameter count doesn't depend on window length, the fair way to
-  compare it against `stereoconv3d` is speed, GPU memory use, and accuracy
+  compare it against `c3d_3dhg_10_fxb` is speed, GPU memory use, and accuracy
   - not size, since both are 0.15 million parameters.
 
 ---
@@ -969,13 +969,13 @@ parts; `YoloStereoNet` instead spends *more* on features to see further.
 
 | model | `--model` | params | what it changes |
 |---|---|---|---|
-| `MobileStereoNet` | `mobilenet` | 0.13 M | dense stages become MobileNetV2 inverted residuals |
-| `AnyStereoNet` | `anynet` | 0.14 M | no 3D convs; coarse-to-fine residual disparity bands |
-| `YoloStereoNet` | `yolo` | 2.61 M | YOLO26 encoder/neck + log-residual decoder |
-| `TempoBandNet` | `temporal` | 0.36 M | *not single-frame* - see Section 11 |
+| `MobileStereoNet` | `mobile2d_3dhg` | 0.13 M | dense stages become MobileNetV2 inverted residuals |
+| `AnyStereoNet` | `pyr2d_casc2d` | 0.14 M | no 3D convs; coarse-to-fine residual disparity bands |
+| `YoloStereoNet` | `yolo2d_3dhg` | 2.61 M | YOLO26 encoder/neck + log-residual decoder |
+| `TempoBandNet` | `siam2d_egomotion_fxb` | 0.36 M | *not single-frame* - see Section 11 |
 
 (Parameter counts at `--max-disp 128`, `--yolo-scale n`. `FastStereoNet`
-itself is `baseline`, 0.20 M - see Section 7.)
+itself is `siam2d_3dhg`, 0.20 M - see Section 7.)
 
 #### 10.1 MobileStereoNet
 
@@ -1100,8 +1100,8 @@ the model size (`n`: 2.61 M params, `s`: 9.39 M params).
 Two things to keep in mind for any comparison table. First, at scale `n`
 this has 2.61 million parameters against `FastStereoNet`'s 0.20 million, so
 it's not a fair, like-for-like comparison and shouldn't be presented as
-one. Measured speed at 480x640 on a GTX 1050 Ti is 53 ms against the
-baseline's 48 ms - only 11% slower despite having 13x the parameters,
+one. Measured speed at 480x640 on a GTX 1050 Ti is 53 ms against
+`siam2d_3dhg`'s 48 ms - only 11% slower despite having 13x the parameters,
 because both spend most of their time in the shared matching and
 refinement steps, not the feature extractor. Second, it needs the
 `ultralytics` package (which the other models do not), and `--crop` must be
@@ -1273,19 +1273,23 @@ detail behind each model.
 
 #### 13.1 Models tested
 
-All eight models are already built and working (see the file column). None
+All twelve models are already built and working (see the file column). None
 of them are just on paper.
 
 | `--model` | Class | Params | Uses several frames? | What it does, in plain words |
 |---|---|---|---|---|
-| `stereoconv` | `StereoConvNet` | 3.79 M | No | Looks at one left/right pair. Uses only ordinary 2D building blocks - the slow, simple, easy-to-follow starting point (Section 6). |
-| `baseline` | `FastStereoNet` | 0.20 M | No | Looks at one left/right pair. Uses a small 3D step to compare the two images. Small and fast, built to run on the drone's onboard computer (Section 7). |
-| `stereoconv3d` | `StereoConv3DNet` | 0.15 M | Yes - last 10 frames | Looks at the last 10 frames at once, with no memory carried between calls. The "just throw more frames at it" way of using time (Section 8). |
-| `stereoconv3d_fast` | `StereoConv3DNet` | 0.15 M | Yes - last 3 frames | The exact same model as `stereoconv3d`, just given 3 frames instead of 10 - cheaper to run (Section 9). |
-| `mobilenet` | `MobileStereoNet` | 0.13 M | No | Same idea as `baseline`, but built from smaller, cheaper building blocks (MobileNet-style). The smallest model in this project (Section 10.1). |
-| `anynet` | `AnyStereoNet` | 0.14 M | No | Same idea as `baseline`, but skips the 3D step and instead searches coarse-to-fine. Can give a quick, rough answer and improve it if there's time to spare (Section 10.2). |
-| `yolo` | `YoloStereoNet` | 2.61 M | No | Same idea as `baseline`, but with a much bigger, stronger feature extractor (from YOLO26). Built to see further away, at the cost of being the biggest single-frame model here (Section 10.3). |
-| `temporal` | `TempoBandNet` | 0.36 M | Yes - remembers the past | Uses the drone's own motion to shift last frame's answer into place, checks a small area around it, and only trusts that guess as much as a learned "confidence" score says to. The most capable model in this project, and the winner of the first full test run (Section 11, Section 15.3). |
+| `siam2d_2dun_fxb` | `StereoConvNet` | 3.79 M | No | Looks at one left/right pair. Uses only ordinary 2D building blocks - the slow, simple, easy-to-follow starting point (Section 6). |
+| `siam2d_3dhg` | `FastStereoNet` | 0.20 M | No | Looks at one left/right pair. Uses a small 3D step to compare the two images. Small and fast, built to run on the drone's onboard computer (Section 7). |
+| `siam2d_3dhg_fxb` | `FastStereoNetFxb` | 0.20 M | No | Same as `siam2d_3dhg`, but also told the camera's focal-length x baseline (`fxb`) as an input, so one trained model still works if it's later paired with a rig whose baseline distance is different from the training data's. |
+| `c3d_3dhg_10_fxb` | `StereoConv3DNet` | 0.15 M | Yes - last 10 frames | Looks at the last 10 frames at once, with no memory carried between calls. The "just throw more frames at it" way of using time (Section 8). |
+| `c3d_3dhg_3_fxb` | `StereoConv3DNet` | 0.15 M | Yes - last 3 frames | The exact same model as `c3d_3dhg_10_fxb`, just given 3 frames instead of 10 - cheaper to run (Section 9). |
+| `mobile2d_3dhg` | `MobileStereoNet` | 0.13 M | No | Same idea as `siam2d_3dhg`, but built from smaller, cheaper building blocks (MobileNet-style). The smallest model in this project (Section 10.1). |
+| `mobile2d_3dhg_fxb` | `MobileStereoNetFxb` | 0.13 M | No | Same as `mobile2d_3dhg`, plus the same `fxb` conditioning as `siam2d_3dhg_fxb` - the smallest model here that can still generalise across rig baselines. |
+| `pyr2d_casc2d` | `AnyStereoNet` | 0.14 M | No | Same idea as `siam2d_3dhg`, but skips the 3D step and instead searches coarse-to-fine. Can give a quick, rough answer and improve it if there's time to spare (Section 10.2). |
+| `pyr2d_casc2d_fxb` | `AnyStereoNetFxb` | 0.14 M | No | Same as `pyr2d_casc2d`, plus `fxb` conditioning. |
+| `yolo2d_3dhg` | `YoloStereoNet` | 2.61 M | No | Same idea as `siam2d_3dhg`, but with a much bigger, stronger feature extractor (from YOLO26). Built to see further away, at the cost of being the biggest single-frame model here (Section 10.3). |
+| `yolo2d_3dhg_fxb` | `YoloStereoNetFxb` | 2.62 M | No | Same as `yolo2d_3dhg`, plus `fxb` conditioning. |
+| `siam2d_egomotion_fxb` | `TempoBandNet` | 0.36 M | Yes - remembers the past | Uses the drone's own motion to shift last frame's answer into place, checks a small area around it, and only trusts that guess as much as a learned "confidence" score says to. The most capable model in this project, and the winner of the first full test run (Section 11, Section 15.3). |
 
 #### 13.2 Configuration tests: how much of the grid search actually runs
 
@@ -1315,11 +1319,11 @@ anyone who wants to re-check it, but the default sweep no longer spends
 compute on it.
 
 All 6 skipped combinations are the same model at the same batch size:
-`temporal` at batch size 16, with one of the two "log-space" losses
-(`logl1`, `hybrid`). `temporal` is already the most memory-hungry model,
+`siam2d_egomotion_fxb` at batch size 16, with one of the two "log-space" losses
+(`logl1`, `hybrid`). `siam2d_egomotion_fxb` is already the most memory-hungry model,
 since it looks at several frames per training step, and those two losses
 need a bit more memory on top of that - together that pushes past the
-training machine's budget. `temporal` at batch size 16 with the plain
+training machine's budget. `siam2d_egomotion_fxb` at batch size 16 with the plain
 `smoothl1` loss still fits and does run.
 
 A fourth loss, `depth26`, exists (Section 14) and can still be requested by
@@ -1332,9 +1336,9 @@ made the grid search 192 combinations (183 feasible) instead of 144, for
 results not expected to place anywhere near the top.
 
 "Expected to fit" is a prediction, not a guarantee for every model: it's
-based on GPU memory actually measured for `baseline`, `anynet`,
-`mobilenet`, `yolo`, and `temporal`. The three newer models
-(`stereoconv`, `stereoconv3d`, `stereoconv3d_fast`) have not been measured
+based on GPU memory actually measured for `siam2d_3dhg`, `pyr2d_casc2d`,
+`mobile2d_3dhg`, `yolo2d_3dhg`, and `siam2d_egomotion_fxb`. The three newer models
+(`siam2d_2dun_fxb`, `c3d_3dhg_10_fxb`, `c3d_3dhg_3_fxb`) have not been measured
 yet, so they are assumed to fit for now, and the training script will
 report honestly (as `FAILED`, not a crash of the whole run) if one of them
 turns out not to.
@@ -1553,8 +1557,8 @@ averaged over all 4 frames, so frame 0 trains the cold-start path and
 frames 1-3 train the memory/gate/search path, in every single training
 example. Gradients only flow between frames through the memory state, not
 through the shifted disparity map. `StereoConv3DNet` instead takes its
-whole window in one go, 10 frames (`stereoconv3d`, Section 8) or 3 frames
-(`stereoconv3d_fast`, Section 9), with no memory carried between calls;
+whole window in one go, 10 frames (`c3d_3dhg_10_fxb`, Section 8) or 3 frames
+(`c3d_3dhg_3_fxb`, Section 9), with no memory carried between calls;
 `--window` defaults accordingly, and `--frame-stride 1` gives the
 "about 1 s" / "about 0.3 s" of history each section describes (this
 project's usual default of 2 is tuned for `TempoBandNet`, not this pair).
@@ -1574,11 +1578,11 @@ during training only.
 3. `YoloStereoNet` (Section 10.3) - does a much stronger feature extractor
    actually help in the 10-30 m range, where a 6 cm camera baseline gives
    less than a pixel of disparity? Compare against a model of similar size,
-   not just against `baseline`;
+   not just against `siam2d_3dhg`;
 4. `TempoBandNet` (Section 11) on AirSim, with no added motion noise - the
    best case, with perfect motion data;
 5. `TempoBandNet` with motion noise added - a robustness curve;
-6. `stereoconv3d` vs `stereoconv3d_fast` (Sections 8-9), 10 frames vs 3
+6. `c3d_3dhg_10_fxb` vs `c3d_3dhg_3_fxb` (Sections 8-9), 10 frames vs 3
    frames, same parameter count either way - does stacking raw frames help
    at all, and how much of its extra cost is actually worth it, compared to
    `TempoBandNet`'s cheaper, motion-aware approach;
@@ -1589,26 +1593,26 @@ during training only.
 Run with:
 
 ```bash
-python train.py --model baseline --data ~/datasets/airsim_stereo --out runs/baseline
-python train.py --model stereoconv --data ~/datasets/airsim_stereo --out runs/stereoconv
-python train.py --model stereoconv3d --frame-stride 1 \
-    --data ~/datasets/airsim_stereo --out runs/stereoconv3d
-python train.py --model stereoconv3d_fast --frame-stride 1 \
-    --data ~/datasets/airsim_stereo --out runs/stereoconv3d_fast
-python train.py --model temporal --window 4 --bs 4 --pose-noise 0.3 \
-    --data ~/datasets/airsim_stereo --out runs/temporal
+python train.py --model siam2d_3dhg --data ~/datasets/airsim_stereo --out runs/siam2d_3dhg
+python train.py --model siam2d_2dun_fxb --data ~/datasets/airsim_stereo --out runs/siam2d_2dun_fxb
+python train.py --model c3d_3dhg_10_fxb --frame-stride 1 \
+    --data ~/datasets/airsim_stereo --out runs/c3d_3dhg_10_fxb
+python train.py --model c3d_3dhg_3_fxb --frame-stride 1 \
+    --data ~/datasets/airsim_stereo --out runs/c3d_3dhg_3_fxb
+python train.py --model siam2d_egomotion_fxb --window 4 --bs 4 --pose-noise 0.3 \
+    --data ~/datasets/airsim_stereo --out runs/siam2d_egomotion_fxb
 
 # a non-default objective, and the YOLO26-encoder model
-python train.py --model anynet --loss logl1 \
+python train.py --model pyr2d_casc2d --loss logl1 \
     --data ~/datasets/airsim_stereo --out runs/anynet_logl1
-python train.py --model yolo --loss hybrid --crop 480x640 \
+python train.py --model yolo2d_3dhg --loss hybrid --crop 480x640 \
     --data ~/datasets/airsim_stereo --out runs/yolo_hybrid
 ```
 
 (`--dataset tartanair --data <root>` switches to TartanAir directly, though
 [train_tartanair.py](train_tartanair.py) is the fuller entry point for that
 corpus - see Section 2.7. Crops must be multiples of 16, or of 32 for
-`--model yolo`; native 256x448 satisfies both.)
+`--model yolo2d_3dhg`; native 256x448 satisfies both.)
 
 #### 15.2 Evaluation
 
@@ -1642,9 +1646,9 @@ at test time (does the guess still work with a bigger 0.5 s gap?), and add
 noise to the motion data at test time.
 
 ```bash
-python evaluate.py --ckpt runs/temporal/best.pth --model temporal \
+python evaluate.py --ckpt runs/siam2d_egomotion_fxb/best.pth --model siam2d_egomotion_fxb \
     --data ~/datasets/airsim_stereo_test --window 8
-python evaluate.py --model temporal --bench --size 256x448 --fp16   # latency
+python evaluate.py --model siam2d_egomotion_fxb --bench --size 256x448 --fp16   # latency
 ```
 
 #### 15.3 Grid search
@@ -1701,22 +1705,22 @@ Measured peak VRAM at 480x640 with `--amp`, for choosing `--grid-bs`:
 
 | model | bs 8 | bs 16 | bs 32 |
 |---|---|---|---|
-| `baseline`, `anynet` | 2.7 GB | 5.5 GB | 11 GB |
-| `mobilenet` | 4.8 GB | 9.5 GB | 19 GB |
-| `yolo` | 3.1 GB | ~6 GB* | ~12 GB* |
-| `temporal` | 11 GB | 22.5 GB | OOM |
+| `siam2d_3dhg`, `pyr2d_casc2d` | 2.7 GB | 5.5 GB | 11 GB |
+| `mobile2d_3dhg` | 4.8 GB | 9.5 GB | 19 GB |
+| `yolo2d_3dhg` | 3.1 GB | ~6 GB* | ~12 GB* |
+| `siam2d_egomotion_fxb` | 11 GB | 22.5 GB | OOM |
 
-`temporal` looks at 4 frames per training step, so it uses about 4x the GPU
-memory of a single-frame model. *`yolo` was only measured at batch size 8
+`siam2d_egomotion_fxb` looks at 4 frames per training step, so it uses about 4x the GPU
+memory of a single-frame model. *`yolo2d_3dhg` was only measured at batch size 8
 (the GPU used for measuring only has 4 GB); the other two numbers are a
 straight-line guess from the pattern the other rows follow, and should be
-re-measured on the real training machine. `stereoconv`, `stereoconv3d` and
-`stereoconv3d_fast` aren't in this table yet - none of them have a measured
+re-measured on the real training machine. `siam2d_2dun_fxb`, `c3d_3dhg_10_fxb` and
+`c3d_3dhg_3_fxb` aren't in this table yet - none of them have a measured
 number, so the sweep lets any batch size through for them and will report
 honestly if one runs out of memory, the same as it would for any other
-unmeasured model. `stereoconv3d` is the most likely of the three to need
-its own row once measured: like `temporal`, its window length (10 frames,
-vs. `stereoconv3d_fast`'s 3) directly multiplies how much memory its 3D
+unmeasured model. `c3d_3dhg_10_fxb` is the most likely of the three to need
+its own row once measured: like `siam2d_egomotion_fxb`, its window length (10 frames,
+vs. `c3d_3dhg_3_fxb`'s 3) directly multiplies how much memory its 3D
 convolutions use.
 
 The recommended order is to **settle on one loss before comparing
@@ -1726,14 +1730,14 @@ be caused by which loss it happened to use:
 ```bash
 # 1. which objective? four losses x the four established models
 python train_tartanair.py --grid-search --data ~/datasets/tartanair \
-    --grid-models baseline temporal mobilenet anynet \
+    --grid-models siam2d_3dhg siam2d_egomotion_fxb mobile2d_3dhg pyr2d_casc2d \
     --grid-loss smoothl1 depth26 logl1 hybrid \
     --grid-bs 8 --grid-lr 3e-4 --grid-epochs 10 --crop 480x640 --amp \
     --out runs/loss_ablation
 
 # 2. then the architecture sweep, at the winning objective
 python train_tartanair.py --grid-search --data ~/datasets/tartanair \
-    --grid-models baseline temporal mobilenet anynet yolo \
+    --grid-models siam2d_3dhg siam2d_egomotion_fxb mobile2d_3dhg pyr2d_casc2d yolo2d_3dhg \
     --grid-epochs 12 --crop 480x640 --workers 1 --amp \
     --max-train-windows 1000 --max-val-windows 1000 \
     --out runs/tartanair_grid
@@ -1741,7 +1745,7 @@ python train_tartanair.py --grid-search --data ~/datasets/tartanair \
 
 **First finished sweep** (`runs/tartanair_grid`, 4 models x batch size
 {8,16} x learning rate {1e-3,3e-3} x 3 losses, 44 of 48 combinations run -
-4 skipped for using too much GPU memory): the winner was `temporal`, batch
+4 skipped for using too much GPU memory): the winner was `siam2d_egomotion_fxb`, batch
 size 8, learning rate 3e-3, loss `logl1` (depth MAE 1.39 m). The choice of
 loss mattered far more than the choice of model - every one of the top 26
 results used `logl1` or `hybrid`, and the best `smoothl1` result only
@@ -1749,7 +1753,7 @@ ranked 27th. So which model wins matters much less than getting off the
 plain disparity loss.
 
 Two changes were made to the defaults based on that result, instead of
-leaving them as one-off flags: **`yolo`** (Section 10.3) is now included by
+leaving them as one-off flags: **`yolo2d_3dhg`** (Section 10.3) is now included by
 default in `--grid-models` - the first sweep only compared models with no
 temporal or long-range-specialized feature extractor - and **`depth26`**
 (Section 14) was made a default `--grid-loss` entry too, so whether it
@@ -1784,26 +1788,26 @@ arguments below are unique to `train_tartanair.py`.
 | argument | default | purpose |
 |---|---|---|
 | `--data` | *required* | TartanAir folder(s); finds all trajectories inside automatically |
-| `--model` | `baseline` | `baseline`, `stereoconv`, `stereoconv3d`, `stereoconv3d_fast`, `temporal`, `mobilenet`, `anynet`, `yolo` (Sections 6-10) |
+| `--model` | `siam2d_3dhg` | `siam2d_3dhg`, `siam2d_2dun_fxb`, `c3d_3dhg_10_fxb`, `c3d_3dhg_3_fxb`, `siam2d_egomotion_fxb`, `mobile2d_3dhg`, `pyr2d_casc2d`, `yolo2d_3dhg` (Sections 6-10) |
 | `--loss` | `smoothl1` | `smoothl1`, `depth26`, `logl1`, `hybrid` (Section 14) |
 | `--loss-w-log`, `--loss-w-grad` | 1.0, 0.5 | how much weight to give the log-space term and the edge-matching term |
 | `--loss-silog-lambda` | 1.0 | how scale-invariant `depth26` is; 0.0 keeps absolute scale instead |
-| `--yolo-scale` | `n` | YOLO26 model size for `--model yolo` (`n`: 2.61 M params, `s`: 9.39 M params) |
-| `--crop` | none | `HxW` random crop, must be a multiple of 16 - **32 for `--model yolo`**. `480x640` works for both and matches the real camera's aspect ratio |
+| `--yolo-scale` | `n` | YOLO26 model size for `--model yolo2d_3dhg` (`n`: 2.61 M params, `s`: 9.39 M params) |
+| `--crop` | none | `HxW` random crop, must be a multiple of 16 - **32 for `--model yolo2d_3dhg`**. `480x640` works for both and matches the real camera's aspect ratio |
 | `--max-disp` | 128 | how far the disparity search reaches; caps how close an object can be before depth clips |
 | `--scale` | 1.0 | image resize factor; scales the camera's focal length and disparity to match (Section 2.7) |
 | `--camera` | `front` | which V2 camera rig to use; only `front` is checked against this project's pose convention |
 | `--difficulty`, `--envs` | both, all | limit to `Data_easy`/`Data_hard`, or to specific named environments |
 | `--val-envs`, `--val-frac` | last 15% | which environments are held out for validation (Section 2.7) |
-| `--window`, `--frame-stride` | model-dependent, 1 | how many frames per window (1 single-frame, 4 `temporal`, 10 `stereoconv3d`, 3 `stereoconv3d_fast`) and the gap between them |
-| `--pose-noise`, `--pose-noise-trans` | 0.0, 0.02 | how much fake motion-sensor noise to add during training (`temporal`) |
+| `--window`, `--frame-stride` | model-dependent, 1 | how many frames per window (1 single-frame, 4 `siam2d_egomotion_fxb`, 10 `c3d_3dhg_10_fxb`, 3 `c3d_3dhg_3_fxb`) and the gap between them |
+| `--pose-noise`, `--pose-noise-trans` | 0.0, 0.02 | how much fake motion-sensor noise to add during training (`siam2d_egomotion_fxb`) |
 | `--max-train-windows`, `--max-val-windows` | 1500, 1000 | cap on how much data each sweep cell uses, so cells are comparable |
 | `--eval-every`, `--print-every` | 2, 10 | how often to validate; how often to print progress |
 | `--amp`, `--workers` | off, 4 | mixed precision; number of data-loading workers |
 | `--resume` / `--init` | none | continue a run (weights + optimiser + epoch) / start from these weights only |
 | `--out`, `--log-dir` | `runs/tartanair`, `logs` | where this run is saved; folder collecting one log file per run |
 | `--grid-search` | off | turn on the sweep described in Section 15.3 |
-| `--grid-models`, `--grid-bs`, `--grid-lr`, `--grid-loss` | 8 models, `8 16`, `1e-3 3e-3`, `smoothl1 logl1 hybrid` | the four things the sweep tries every combination of (Section 15.3); `yolo` is on by default because of the first sweep's result, `depth26` and `1e-2` are off by default because later sweeps measured them and found them clearly worse (pass either explicitly to include it anyway) |
+| `--grid-models`, `--grid-bs`, `--grid-lr`, `--grid-loss` | 8 models, `8 16`, `1e-3 3e-3`, `smoothl1 logl1 hybrid` | the four things the sweep tries every combination of (Section 15.3); `yolo2d_3dhg` is on by default because of the first sweep's result, `depth26` and `1e-2` are off by default because later sweeps measured them and found them clearly worse (pass either explicitly to include it anyway) |
 | `--grid-epochs` | 10 | epochs per combination, kept separate from `--epochs` |
 | `--grid-force-rerun` | off | redo combinations an earlier sweep already finished |
 | `--no-tensorboard`, `--tensorboard-port` | on, 6006 | the training dashboard for the sweep |
@@ -1817,7 +1821,7 @@ arguments below are unique to `train_tartanair.py`.
 | [models/common.py](models/common.py) | shared blocks: encoder, cost volume, 3D hourglass, refinement |
 | [models/stereo_conv_net.py](models/stereo_conv_net.py) | `StereoConvNet`: 1D correlation, 2D-conv U-Net aggregation, learned upsample (Section 6) |
 | [models/baseline_net.py](models/baseline_net.py) | `FastStereoNet` (Section 7) |
-| [models/stereo_conv3d_net.py](models/stereo_conv3d_net.py) | `StereoConv3DNet`: 3D-conv encoder + `FastStereoNet`'s aggregation/refinement, `stereoconv3d` (T=10, Section 8) and `stereoconv3d_fast` (T=3, Section 9) share this one class |
+| [models/stereo_conv3d_net.py](models/stereo_conv3d_net.py) | `StereoConv3DNet`: 3D-conv encoder + `FastStereoNet`'s aggregation/refinement, `c3d_3dhg_10_fxb` (T=10, Section 8) and `c3d_3dhg_3_fxb` (T=3, Section 9) share this one class |
 | [models/temporal_net.py](models/temporal_net.py) | `TempoBandNet`: splatting, gate, narrow bands (Section 11) |
 | [models/yolo_stereo.py](models/yolo_stereo.py) | `YoloStereoNet`: YOLO26 encoder/decoder around the shared cost volume |
 | [models/yolo26_stereo.yaml](models/yolo26_stereo.yaml) | vendored YOLO26 backbone + PAN neck config for the above |

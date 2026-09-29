@@ -1,4 +1,4 @@
-"""Train the baseline (FastStereoNet) or temporal (TempoBandNet) model on TartanAir.
+"""Train the siam2d_3dhg (FastStereoNet) or siam2d_egomotion_fxb (TempoBandNet) model on TartanAir.
 
 Companion to train.py, which trains on the AirSim sequences recorded by
 collect_dataset.py. The optimisation is *identical* - loss, schedule, metrics
@@ -20,41 +20,39 @@ Getting the data (V2, https://tartanair.org):
         modality=['image','depth'], camera_name=['lcam_front','rcam_front'], unzip=True)"
 
 Examples:
-    # baseline, single frames, held-out environments for validation
-    python train_tartanair.py --model baseline --data ~/datasets/tartanair \
-        --crop 480x640 --out runs/tartanair_baseline
+    # siam2d_3dhg, single frames, held-out environments for validation
+    python train_tartanair.py --model siam2d_3dhg --data ~/datasets/tartanair \
+        --crop 480x640 --out runs/tartanair_siam2d_3dhg
 
-    # temporal, windows of 4 frames with simulated VIO noise
-    python train_tartanair.py --model temporal --window 4 --bs 4 \
+    # siam2d_egomotion_fxb, windows of 4 frames with simulated VIO noise
+    python train_tartanair.py --model siam2d_egomotion_fxb --window 4 --bs 4 \
         --data ~/datasets/tartanair --crop 480x640 --pose-noise 0.3 \
-        --out runs/tartanair_temporal
+        --out runs/tartanair_siam2d_egomotion_fxb
 
     # pre-train here, then fine-tune on the AirSim rig with train.py --resume
-    python train_tartanair.py --model baseline --data ~/datasets/tartanair \
+    python train_tartanair.py --model siam2d_3dhg --data ~/datasets/tartanair \
         --out runs/tartanair_pre
-    python train.py --model baseline --data ~/datasets/airsim_stereo \
+    python train.py --model siam2d_3dhg --data ~/datasets/airsim_stereo \
         --out runs/finetune --init runs/tartanair_pre/best.pth
 
-    # yolo (a YOLO26 encoder/decoder around the same cost volume) with the
-    # log-space objective; --crop must be a multiple of 32 for this model
-    python train_tartanair.py --model yolo --loss logl1 --crop 480x640 \
-        --data ~/datasets/tartanair --out runs/tartanair_yolo
+    # yolo2d_3dhg (a YOLO26 encoder/decoder around the same cost volume) with
+    # the log-space objective; --crop must be a multiple of 32 for this model
+    python train_tartanair.py --model yolo2d_3dhg --loss logl1 --crop 480x640 \
+        --data ~/datasets/tartanair --out runs/tartanair_yolo2d_3dhg
 
     # grid search: sweep --grid-models x --grid-bs x --grid-lr x --grid-loss,
     # each combo a fresh subprocess (so a CUDA OOM in one can't corrupt the
     # next), skipping combos already completed by an earlier interrupted sweep
-    # and resuming ones that stopped part-way. The defaults are a model x loss
-    # comparison at the bs/lr values earlier sweeps (runs/tartanair_grid)
-    # already settled on - all twelve models x bs=16 x lr=1e-3 x
-    # loss={smoothl1,logl1,hybrid}, minus the combos measured not to fit in
-    # 24GB - so this is the whole command:
+    # and resuming ones that stopped part-way. The defaults are all twelve
+    # models x bs={8,16} x lr={1e-3,3e-3} x loss={logl1,hybrid}, minus the
+    # combos measured not to fit in 24GB - so this is the whole command:
     python train_tartanair.py --grid-search --data ~/datasets/tartanair \
         --amp --out runs/tartanair_grid
 
     # compare objectives across the existing models *before* comparing
     # architectures, so a later result cannot confound the two
     python train_tartanair.py --grid-search --data ~/datasets/tartanair \
-        --grid-models baseline temporal mobilenet anynet \
+        --grid-models siam2d_3dhg siam2d_egomotion_fxb mobile2d_3dhg pyr2d_casc2d \
         --grid-loss smoothl1 depth26 logl1 hybrid \
         --grid-bs 8 --grid-lr 3e-4 --grid-epochs 10 --crop 480x640 --amp \
         --out runs/loss_ablation
@@ -75,8 +73,10 @@ import itertools
 import math
 import os
 import random
+import re
 import shutil
 import socket
+import statistics
 import subprocess
 import sys
 import time
@@ -90,16 +90,21 @@ from losses import LOSS_CHOICES, add_loss_args
 from train import fit, sequence_split, log_exception, _now
 from models import build_model, count_parameters
 
-MODEL_CHOICES = ["baseline", "baseline_fxb", "stereoconv", "stereoconv3d",
-                 "stereoconv3d_fast", "temporal", "mobilenet", "mobilenet_fxb",
-                 "anynet", "anynet_fxb", "yolo", "yolo_fxb"]
-# depth26 stays a valid --loss/--grid-loss choice (LOSS_CHOICES, losses.py),
-# but is no longer swept by default: every combo tried so far gave far worse
-# EPE and depth MAE than the other three losses (its SILog term is
-# scale-invariant, the wrong choice when stereo's fxb already gives true
-# metric scale - see losses.py and PAPER.md Section 14). Pass
-# `--grid-loss ... depth26` explicitly to include it again.
-GRID_LOSS_DEFAULT = [l for l in LOSS_CHOICES if l != "depth26"]
+MODEL_CHOICES = ["siam2d_3dhg", "siam2d_3dhg_fxb", "siam2d_2dun_fxb",
+                 "c3d_3dhg_10_fxb", "c3d_3dhg_3_fxb", "siam2d_egomotion_fxb",
+                 "mobile2d_3dhg", "mobile2d_3dhg_fxb", "pyr2d_casc2d",
+                 "pyr2d_casc2d_fxb", "yolo2d_3dhg", "yolo2d_3dhg_fxb"]
+# depth26 and smoothl1 stay valid --loss/--grid-loss choices (LOSS_CHOICES,
+# losses.py), but neither is swept by default any more. depth26: every combo
+# tried so far gave far worse EPE and depth MAE than the other losses (its
+# SILog term is scale-invariant, the wrong choice when stereo's fxb already
+# gives true metric scale - see losses.py and PAPER.md Section 14). smoothl1:
+# the disparity-space control has consistently placed behind the log-space
+# losses across every sweep run so far, so the default sweep spends its
+# budget on the two objectives that actually contend for the win. Pass
+# `--grid-loss ... depth26` or `... smoothl1` explicitly to include either
+# again.
+GRID_LOSS_DEFAULT = [l for l in LOSS_CHOICES if l not in ("depth26", "smoothl1")]
 DEFAULT_LOSS = "smoothl1"
 
 
@@ -252,7 +257,8 @@ _GRID_PASSTHROUGH_ARGS = [
 # disparity, and so its EPE, drifts. Ranking on EPE alone would drop it for the
 # wrong reason.
 _SUMMARY_FIELDS = ["model", "batch_size", "lr", "loss", "status", "best_val_epe",
-                   "final_val_epe", "best_val_depth_mae", "seconds"]
+                   "best_epoch", "final_val_epe", "best_val_depth_mae", "seconds",
+                   "avg_infer_ms"]
 
 
 def _passthrough_argv(args):
@@ -314,6 +320,112 @@ def _log_csv_epes(log_csv_path):
             "" if best_mae is None else f"{best_mae:.4f}")
 
 
+def _log_csv_best_epoch(log_csv_path):
+    """Epoch number of the row that holds the minimum val_epe, i.e. the epoch
+    best.pth was last overwritten at - fit() saves best.pth exactly when
+    val_epe strictly improves on the running minimum, so replaying that same
+    strict-improvement rule over log.csv reproduces which epoch it landed on
+    without needing to open the checkpoint itself. "" if no epoch evaluated.
+    """
+    if not os.path.exists(log_csv_path):
+        return ""
+    best = best_epoch = None
+    with open(log_csv_path, newline="") as f:
+        for row in csv.DictReader(f):
+            v = row.get("val_epe", "")
+            if v == "":
+                continue
+            v = float(v)
+            if best is None or v < best:
+                best, best_epoch = v, int(row["epoch"])
+    return "" if best_epoch is None else str(best_epoch)
+
+
+def _log_csv_total_seconds(log_csv_path):
+    """Sum of every epoch's `seconds` column - an approximation of total
+    training wall time reconstructable from log.csv alone. Used by
+    summarize_grid(), which (unlike run_grid_search) never wraps the run in
+    its own timer, so this is the only source it has; it under-counts
+    slightly vs. the live sweep's own timing (that one also captures
+    subprocess startup/import overhead this cannot see)."""
+    if not os.path.exists(log_csv_path):
+        return 0.0
+    total = 0.0
+    with open(log_csv_path, newline="") as f:
+        for row in csv.DictReader(f):
+            try:
+                total += float(row.get("seconds") or 0)
+            except ValueError:
+                pass
+    return total
+
+
+# Printed once at startup (describe_calibration/subsample in this file): the
+# capped line only appears when --data-fraction/--max-val-windows actually
+# shrank the validation set, so it is checked first and the uncapped line
+# ("N environments, M trajectories -> ... val windows") is the fallback.
+_VAL_WINDOWS_CAPPED_RE = re.compile(r"capped validation set: \d+ -> (\d+) windows")
+_VAL_WINDOWS_FULL_RE = re.compile(r"-> \d+ train / (\d+) val windows")
+
+
+def _val_windows_from_stdout(stdout_path):
+    """How many validation windows a run actually evaluated on, read back
+    from its own startup banner. Needed to turn a wall-clock eval cost into a
+    per-window estimate; returns None if the banner isn't there (e.g. the
+    run crashed before printing it)."""
+    try:
+        with open(stdout_path, errors="replace") as f:
+            text = f.read()
+    except OSError:
+        return None
+    m = _VAL_WINDOWS_CAPPED_RE.search(text)
+    if m:
+        return int(m.group(1))
+    m = _VAL_WINDOWS_FULL_RE.search(text)
+    return int(m.group(1)) if m else None
+
+
+def _avg_infer_ms(log_csv_path, stdout_path):
+    """Estimate average per-window inference time from the run's last
+    completed evaluation, in milliseconds - "" if it cannot be estimated.
+
+    Not measured directly: log.csv's `seconds` column is a whole epoch's wall
+    time, train+eval combined on an epoch that evaluates. This isolates the
+    eval cost by subtracting the median *non*-eval epoch's time (a clean
+    train-only baseline) from the last eval epoch's time, then divides by how
+    many validation windows that evaluation actually ran over (from the run's
+    startup banner). It is therefore an estimate of the whole eval step
+    (data loading included, not just the GPU forward pass) - for a clean
+    isolated latency number see evaluate.py --bench.
+
+    Needs at least one non-eval epoch to form the baseline, so a run trained
+    with --eval-every 1 (every epoch evaluates) has nothing to subtract
+    against and returns "".
+    """
+    if not os.path.exists(log_csv_path):
+        return ""
+    train_only, eval_seconds = [], None
+    with open(log_csv_path, newline="") as f:
+        for row in csv.DictReader(f):
+            try:
+                secs = float(row["seconds"])
+            except (KeyError, ValueError):
+                continue
+            if row.get("val_epe", "") == "":
+                train_only.append(secs)
+            else:
+                eval_seconds = secs  # rows are in epoch order, so the last wins
+    if eval_seconds is None or not train_only:
+        return ""
+    delta = eval_seconds - statistics.median(train_only)
+    if delta <= 0:
+        return ""  # noisy timing swamped the signal - don't report nonsense
+    n_val = _val_windows_from_stdout(stdout_path)
+    if not n_val:
+        return ""
+    return f"{delta / n_val * 1000.0:.1f}"
+
+
 def _update_summary(summary_path, model, bs, lr, loss, row):
     """Rewrite summary.csv with `row` replacing any existing row for this
     (model,bs,lr,loss), so re-running a sweep updates in place instead of
@@ -354,22 +466,24 @@ def _lan_ip():
 
 
 # Measured peak VRAM per sample at 480x640 with --amp (see PAPER/benchmarks):
-# baseline 0.34, anynet 0.33, mobilenet 0.60, yolo ~0.39, temporal 1.41 GB.
-# temporal is ~4x the rest purely because window=4 backprops through 4 frames.
-_GB_PER_SAMPLE = {"baseline": 0.34, "anynet": 0.33, "mobilenet": 0.60,
-                  "yolo": 0.39, "temporal": 1.41,
+# siam2d_3dhg 0.34, pyr2d_casc2d 0.33, mobile2d_3dhg 0.60, yolo2d_3dhg ~0.39,
+# siam2d_egomotion_fxb 1.41 GB. siam2d_egomotion_fxb is ~4x the rest purely
+# because window=4 backprops through 4 frames.
+_GB_PER_SAMPLE = {"siam2d_3dhg": 0.34, "pyr2d_casc2d": 0.33,
+                  "mobile2d_3dhg": 0.60, "yolo2d_3dhg": 0.39,
+                  "siam2d_egomotion_fxb": 1.41,
                   # _fxb variants add one 1x1-conv conditioning block each -
                   # negligible extra activations vs. the parent architecture,
                   # so the same measured per-sample cost applies.
-                  "baseline_fxb": 0.34, "anynet_fxb": 0.33,
-                  "mobilenet_fxb": 0.60, "yolo_fxb": 0.39}
+                  "siam2d_3dhg_fxb": 0.34, "pyr2d_casc2d_fxb": 0.33,
+                  "mobile2d_3dhg_fxb": 0.60, "yolo2d_3dhg_fxb": 0.39}
 # The log-space losses build multi-scale gradient tensors on top of the model's
-# own activations; measured to push temporal bs=16 from 22.5GB over the 24GB
-# edge, so they carry a surcharge when deciding feasibility.
+# own activations; measured to push siam2d_egomotion_fxb bs=16 from 22.5GB
+# over the 24GB edge, so they carry a surcharge when deciding feasibility.
 _LOG_LOSSES = {"depth26", "logl1", "hybrid"}
 _LOSS_VRAM_SURCHARGE = 1.12
-# Calibrated against measurements on a 23.5GB-usable 4090: temporal bs=16
-# smoothl1 peaks at 22.5GB and does run, while the same config on logl1
+# Calibrated against measurements on a 23.5GB-usable 4090: siam2d_egomotion_fxb
+# bs=16 smoothl1 peaks at 22.5GB and does run, while the same config on logl1
 # (est. 25.3GB) OOMs. 23.0 is the threshold that reproduces both outcomes.
 # It is deliberately tight rather than safe - a combo that squeaks in and then
 # OOMs is caught and reported by the run loop, whereas one wrongly excluded
@@ -588,7 +702,8 @@ def write_report(rows, skipped, args, out_root, elapsed_s, tb_url=None):
              "EPE would favour the wrong objective (see losses.py).")
     L.append("")
     hdr = ["#", "model", "bs", "lr", "loss", "status", "depth MAE (m)",
-           "best EPE (px)", "final EPE (px)", "sec"]
+           "best EPE (px)", "best epoch", "final EPE (px)", "sec",
+           "infer ms/win (est)"]
     L.append("| " + " | ".join(hdr) + " |")
     L.append("|" + "|".join("---" for _ in hdr) + "|")
     for i, r in enumerate(rows, 1):
@@ -596,8 +711,9 @@ def write_report(rows, skipped, args, out_root, elapsed_s, tb_url=None):
             str(i), r.get("model", ""), r.get("batch_size", ""), r.get("lr", ""),
             r.get("loss", ""), r.get("status", ""),
             r.get("best_val_depth_mae", "") or "-",
-            r.get("best_val_epe", "") or "-", r.get("final_val_epe", "") or "-",
-            r.get("seconds", ""),
+            r.get("best_val_epe", "") or "-", r.get("best_epoch", "") or "-",
+            r.get("final_val_epe", "") or "-",
+            r.get("seconds", ""), r.get("avg_infer_ms", "") or "-",
         ]) + " |")
     L.append("")
 
@@ -622,8 +738,7 @@ def write_report(rows, skipped, args, out_root, elapsed_s, tb_url=None):
             L.append(f"- `{r['model']} bs={r['batch_size']} lr={r['lr']} "
                      f"loss={r['loss']}` - {r['status']} "
                      f"(see `{r['model']}_bs{r['batch_size']}_lr{r['lr']}"
-                     f"{'' if r['loss'] == DEFAULT_LOSS else '_' + r['loss']}"
-                     f"/stdout.log`)")
+                     f"_{r['loss']}/stdout.log`)")
         L.append("")
 
     L.append("## Winner")
@@ -700,6 +815,95 @@ def _print_summary(rows, out_root, tb_url=None):
             print(f"  then from another PC on the LAN: http://{ip}:6006")
 
 
+# A run directory is always named f"{model}_bs{bs}_lr{lr}_{loss}"
+# (run_grid_search, below) - "_bs" and "_lr" are inserted as fixed literal
+# markers by that same f-string, and no --model name contains either
+# substring, so splitting on the *last* such marker recovers model even
+# though model itself is full of underscores (siam2d_3dhg_fxb,
+# c3d_3dhg_10_fxb, ...). Directories from before every loss got an explicit
+# suffix have none for smoothl1 (the original DEFAULT_LOSS); _parse_run_name
+# still falls back to smoothl1 for those so old sweeps stay resumable.
+_RUN_NAME_RE = re.compile(r"^(?P<model>.+)_bs(?P<bs>\d+)_lr(?P<rest>.+)$")
+
+
+def _parse_run_name(name):
+    """run directory name -> (model, bs, lr, loss), or None if it doesn't
+    match the f"{model}_bs{bs}_lr{lr}_{loss}" pattern run_grid_search names
+    directories with. A directory with no loss suffix at all is legacy (from
+    before every loss got one) and is assumed to be smoothl1, the original
+    DEFAULT_LOSS - see the comment on _RUN_NAME_RE above."""
+    m = _RUN_NAME_RE.match(name)
+    if not m:
+        return None
+    model, bs, rest = m.group("model"), int(m.group("bs")), m.group("rest")
+    loss = DEFAULT_LOSS
+    for l in LOSS_CHOICES:
+        if rest.endswith(f"_{l}"):
+            loss = l
+            rest = rest[:-len(l) - 1]
+            break
+    return model, bs, rest, loss
+
+
+def summarize_grid(out_root):
+    """Rebuild summary.csv (and print it) straight from whatever run
+    directories are actually sitting under `out_root`, instead of from the
+    combo list a particular --grid-models/--grid-bs/--grid-lr/--grid-loss
+    would produce.
+
+    This is the tool for the case run_grid_search doesn't cover: summary.csv
+    fell out of sync with the directories on disk (they were renamed, moved
+    from elsewhere, or a stale summary.csv predates some of them) and needs
+    refreshing without re-running or resuming anything. report.md is not
+    regenerated here - its header describes a single coherent sweep
+    (one epoch count, one data fraction, one set of axes), which a folder
+    that may hold runs from several different sweeps over time cannot
+    honestly fill in.
+    """
+    if not os.path.isdir(out_root):
+        raise SystemExit(f"error: {out_root} does not exist")
+
+    rows = []
+    for name in sorted(os.listdir(out_root)):
+        run_out = os.path.join(out_root, name)
+        if not os.path.isdir(run_out):
+            continue
+        parsed = _parse_run_name(name)
+        if parsed is None:
+            continue  # not a run directory (logs/, or a stray folder)
+        model, bs, lr, loss = parsed
+
+        log_csv_path = os.path.join(run_out, "log.csv")
+        stdout_path = os.path.join(run_out, "stdout.log")
+        done = _log_csv_epochs_done(log_csv_path)
+        if done == 0:
+            oom = _run_hit_oom(stdout_path)
+            status = ("OOM" if oom else
+                      "FAILED" if os.path.exists(stdout_path) else "EMPTY")
+            best_epe = final_epe = best_mae = best_epoch = infer_ms = ""
+        else:
+            status = "OK"
+            best_epe, final_epe, best_mae = _log_csv_epes(log_csv_path)
+            best_epoch = _log_csv_best_epoch(log_csv_path)
+            infer_ms = _avg_infer_ms(log_csv_path, stdout_path)
+
+        rows.append({"model": model, "batch_size": str(bs), "lr": lr,
+                     "loss": loss, "status": status, "best_val_epe": best_epe,
+                     "best_epoch": best_epoch, "final_val_epe": final_epe,
+                     "best_val_depth_mae": best_mae,
+                     "seconds": f"{_log_csv_total_seconds(log_csv_path):.0f}",
+                     "avg_infer_ms": infer_ms})
+
+    summary_path = os.path.join(out_root, "summary.csv")
+    with open(summary_path, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=_SUMMARY_FIELDS)
+        w.writeheader()
+        w.writerows(rows)
+
+    _print_summary(rows, out_root)
+    print(f"\n=== summary written: {summary_path} ({len(rows)} runs found) ===")
+
+
 def run_grid_search(args):
     """Orchestrate the sweep: build the combo list, skip already-completed
     combos, run the rest as subprocesses, keep summary.csv updated as it
@@ -746,12 +950,7 @@ def run_grid_search(args):
 
     try:
         for i, (model, bs, lr, loss) in enumerate(combos, 1):
-            # The loss suffix is omitted for the default, so run directories
-            # from sweeps that predate --loss keep matching and are still
-            # skipped/resumed rather than silently retrained from scratch.
-            run_name = f"{model}_bs{bs}_lr{lr}"
-            if loss != DEFAULT_LOSS:
-                run_name += f"_{loss}"
+            run_name = f"{model}_bs{bs}_lr{lr}_{loss}"
             run_out = os.path.join(out_root, run_name)
             log_csv_path = os.path.join(run_out, "log.csv")
 
@@ -762,10 +961,15 @@ def run_grid_search(args):
                     slog(f"\n=== [{i}/{total}] {run_name} -> already complete "
                          f"({done}/{args.grid_epochs} epochs), skipping ===")
                     best_epe, final_epe, best_mae = _log_csv_epes(log_csv_path)
+                    best_epoch = _log_csv_best_epoch(log_csv_path)
+                    infer_ms = _avg_infer_ms(log_csv_path,
+                                             os.path.join(run_out, "stdout.log"))
                     row = {"model": model, "batch_size": str(bs), "lr": lr,
                            "loss": loss, "status": "SKIPPED",
-                           "best_val_epe": best_epe, "final_val_epe": final_epe,
-                           "best_val_depth_mae": best_mae, "seconds": "0"}
+                           "best_val_epe": best_epe, "best_epoch": best_epoch,
+                           "final_val_epe": final_epe,
+                           "best_val_depth_mae": best_mae, "seconds": "0",
+                           "avg_infer_ms": infer_ms}
                     rows = _update_summary(summary_path, model, bs, lr, loss, row)
                     continue
                 # Partially trained (interrupted sweep, machine reboot, a
@@ -783,8 +987,9 @@ def run_grid_search(args):
                 slog(f"!!! could not create {run_out}: {e}, skipping")
                 row = {"model": model, "batch_size": str(bs), "lr": lr,
                        "loss": loss, "status": "FAILED", "best_val_epe": "",
-                       "final_val_epe": "", "best_val_depth_mae": "",
-                       "seconds": "0"}
+                       "best_epoch": "", "final_val_epe": "",
+                       "best_val_depth_mae": "",
+                       "seconds": "0", "avg_infer_ms": ""}
                 rows = _update_summary(summary_path, model, bs, lr, loss, row)
                 continue
 
@@ -825,16 +1030,19 @@ def run_grid_search(args):
                 _cleanup_failed_run(run_out, drop_checkpoints=oom, slog=slog)
                 row = {"model": model, "batch_size": str(bs), "lr": lr,
                        "loss": loss, "status": "OOM" if oom else "FAILED",
-                       "best_val_epe": "", "final_val_epe": "",
-                       "best_val_depth_mae": "", "seconds": f"{dt:.0f}"}
+                       "best_val_epe": "", "best_epoch": "", "final_val_epe": "",
+                       "best_val_depth_mae": "", "seconds": f"{dt:.0f}",
+                       "avg_infer_ms": ""}
                 rows = _update_summary(summary_path, model, bs, lr, loss, row)
                 continue
 
             best_epe, final_epe, best_mae = _log_csv_epes(log_csv_path)
+            best_epoch = _log_csv_best_epoch(log_csv_path)
+            infer_ms = _avg_infer_ms(log_csv_path, os.path.join(run_out, "stdout.log"))
             row = {"model": model, "batch_size": str(bs), "lr": lr, "loss": loss,
-                   "status": "OK", "best_val_epe": best_epe,
+                   "status": "OK", "best_val_epe": best_epe, "best_epoch": best_epoch,
                    "final_val_epe": final_epe, "best_val_depth_mae": best_mae,
-                   "seconds": f"{dt:.0f}"}
+                   "seconds": f"{dt:.0f}", "avg_infer_ms": infer_ms}
             rows = _update_summary(summary_path, model, bs, lr, loss, row)
     finally:
         if os.path.exists(summary_path):
@@ -878,21 +1086,24 @@ def run_grid_search(args):
 def main():
     ap = argparse.ArgumentParser(
         description="Train the stereo depth models on TartanAir (V1 or V2).")
-    ap.add_argument("--data", nargs="+", required=True,
-                    help="TartanAir root(s); trajectories are found recursively")
-    ap.add_argument("--model", default="baseline", choices=MODEL_CHOICES)
+    ap.add_argument("--data", nargs="+", default=None,
+                    help="TartanAir root(s); trajectories are found recursively. "
+                         "Required unless --grid-summarize (which reads only "
+                         "already-trained runs, not the dataset)")
+    ap.add_argument("--model", default="siam2d_3dhg", choices=MODEL_CHOICES)
     ap.add_argument("--out", default="runs/tartanair")
     ap.add_argument("--epochs", type=int, default=30)
     ap.add_argument("--bs", type=int, default=8)
     ap.add_argument("--lr", type=float, default=4e-4)
     ap.add_argument("--window", type=int, default=None,
-                    help="temporal window (default: 1 baseline, 4 temporal)")
+                    help="temporal window (default: 1 siam2d_3dhg, "
+                         "4 siam2d_egomotion_fxb)")
     ap.add_argument("--frame-stride", type=int, default=1,
                     help="gap between window frames (TartanAir already moves a "
                          "long way between its 10 Hz frames, hence 1)")
     ap.add_argument("--crop", default="480x640",
                     help="HxW random crop (multiple of 16, or of 32 for --model "
-                         "yolo, whose backbone reaches 1/32). The default "
+                         "yolo2d_3dhg, whose backbone reaches 1/32). The default "
                          "480x640 crops TartanAir's 640x640 frames vertically "
                          "only: it matches the deployment camera's 4:3 aspect "
                          "ratio, fits V1 and V2, and satisfies both multiple-of "
@@ -904,8 +1115,8 @@ def main():
     ap.add_argument("--max-disp", type=int, default=128)
     add_loss_args(ap)
     ap.add_argument("--yolo-scale", default="n", choices=["n", "s", "m", "l", "x"],
-                    help="YOLO26 compound scale for --model yolo. 'n' is 2.6M "
-                         "params against baseline's 0.3M, so a comparison "
+                    help="YOLO26 compound scale for --model yolo2d_3dhg. 'n' is "
+                         "2.6M params against siam2d_3dhg's 0.3M, so a comparison "
                          "table should say so; 's' is 9.4M.")
     ap.add_argument("--scale", type=float, default=1.0,
                     help="resize factor; scales fx and disparity linearly "
@@ -923,7 +1134,8 @@ def main():
     ap.add_argument("--val-frac", type=float, default=0.15,
                     help="fraction of *environments* held out for validation")
     ap.add_argument("--pose-noise", type=float, default=0.0,
-                    help="train-time rotation noise on rel poses, deg (temporal)")
+                    help="train-time rotation noise on rel poses, deg "
+                         "(siam2d_egomotion_fxb)")
     ap.add_argument("--pose-noise-trans", type=float, default=0.02)
     ap.add_argument("--workers", type=int, default=8,
                     help="DataLoader workers. 8 measured: 1 worker caps the "
@@ -989,68 +1201,87 @@ def main():
                          "becomes the sweep's output root. Each combo runs as "
                          "its own subprocess (isolates a CUDA OOM to one run) "
                          "and is skipped on a re-run if already complete.")
+    ap.add_argument("--grid-summarize", action="store_true",
+                    help="rebuild summary.csv (and print it) from the run "
+                         "directories actually present under --out, without "
+                         "training or resuming anything and without needing "
+                         "--data. For when summary.csv has fallen out of sync "
+                         "with the directories on disk - e.g. "
+                         "`--grid-summarize --out runs/tartanair_grid`.")
     ap.add_argument("--grid-models", nargs="+", default=MODEL_CHOICES,
                     choices=MODEL_CHOICES,
-                    help="default is all twelve models, yolo included. The "
-                         "'_fxb' variants (baseline_fxb, mobilenet_fxb, "
-                         "anynet_fxb, yolo_fxb) additionally take fxb (focal "
+                    help="default is all twelve models, yolo2d_3dhg included. "
+                         "The '_fxb' variants (siam2d_3dhg_fxb, "
+                         "mobile2d_3dhg_fxb, pyr2d_casc2d_fxb, "
+                         "yolo2d_3dhg_fxb) additionally take fxb (focal "
                          "x baseline) as a network input, conditioning the "
                          "siamese features on it before matching, so one "
                          "trained model can generalise across whatever "
                          "stereo baseline it is given at inference - the "
-                         "same idea stereoconv/stereoconv3d/temporal already "
-                         "use (see models/common.py FxbConditioning). yolo "
-                         "and yolo_fxb need ultralytics installed (imported "
-                         "lazily, only for these models); pass --grid-models "
-                         "without them to exclude it, e.g. on a machine "
-                         "without that dependency")
-    ap.add_argument("--grid-bs", nargs="+", type=int, default=[16],
+                         "same idea siam2d_2dun_fxb/c3d_3dhg_10_fxb/"
+                         "siam2d_egomotion_fxb already "
+                         "use (see models/common.py FxbConditioning). "
+                         "yolo2d_3dhg and yolo2d_3dhg_fxb need ultralytics "
+                         "installed (imported lazily, only for these "
+                         "models); pass --grid-models without them to "
+                         "exclude it, e.g. on a machine without that "
+                         "dependency")
+    ap.add_argument("--grid-bs", nargs="+", type=int, default=[8, 16],
                     help="ascending, so the cheapest (and least OOM-prone) "
                          "combos report first. Measured peak VRAM at 480x640 "
-                         "with --amp: baseline/anynet ~2.7/5.5/11GB, mobilenet "
-                         "~4.8/9.5/19GB, temporal ~11/22.5GB and OOM at 32 "
-                         "(its window=4 backprop is ~4x the activations); yolo "
-                         "3.1GB at bs=8 measured, so ~6/12GB at 16/32 on the "
-                         "linear scaling the other rows show. Defaults to just "
-                         "16 - the earlier bs{8,16} sweep (runs/tartanair_grid) "
-                         "showed bs=16 winning or tying bs=8 across models, so "
-                         "the model-comparison sweep no longer needs to pay "
-                         "for both.")
-    ap.add_argument("--grid-lr", nargs="+", default=["1e-3"],
-                    help="defaults to just 1e-3 now that a model-comparison "
-                         "sweep is the point rather than an lr search: the "
-                         "earlier lr sweep (runs/tartanair_grid) tried "
-                         "3e-4/1e-3/3e-3/1e-2 and 1e-2 came back with the "
-                         "worst average EPE and depth MAE of the rates tried "
-                         "and zero top-10 results by depth MAE; 3e-3 briefly "
-                         "looked best on one early pass but lost once "
-                         "measured across every model/loss combo. Pass "
-                         "multiple values to re-run an lr comparison, e.g. "
-                         "`--grid-lr 1e-3 3e-3`. Kept as literal strings (not "
-                         "parsed to float) so run directory names match "
+                         "with --amp: siam2d_3dhg/pyr2d_casc2d ~2.7/5.5/11GB, "
+                         "mobile2d_3dhg ~4.8/9.5/19GB, siam2d_egomotion_fxb "
+                         "~11/22.5GB and OOM at 32 (its window=4 backprop is "
+                         "~4x the activations); yolo2d_3dhg 3.1GB at bs=8 "
+                         "measured, so ~6/12GB at 16/32 on the linear scaling "
+                         "the other rows show. Defaults to both 8 and 16: the "
+                         "bs{8,16} sweep (runs/tartanair_grid) has bs=8 combos "
+                         "(siam2d_egomotion_fxb, yolo2d_3dhg, pyr2d_casc2d) "
+                         "placing well up the top-10 by depth MAE too, so "
+                         "bs=16-only would trade away real completeness for "
+                         "speed. Pass "
+                         "`--grid-bs 16` for just the cheaper half.")
+    ap.add_argument("--grid-lr", nargs="+", default=["1e-3", "3e-3"],
+                    help="defaults to 1e-3 and 3e-3. An earlier lr sweep "
+                         "(runs/tartanair_grid) tried 3e-4/1e-3/3e-3/1e-2 and "
+                         "1e-2 came back with the worst average EPE and depth "
+                         "MAE of the rates tried and zero top-10 results by "
+                         "depth MAE, so it was dropped; 3e-4 was never "
+                         "competitive either. 3e-3 and 1e-3 have since swapped "
+                         "places more than once as the model/bs/loss axes grew "
+                         "(the bs{8,16} sweep put 3e-3 combos in most of the "
+                         "top 10 by depth MAE), so both stay in the default "
+                         "rather than picking one. Kept as literal strings "
+                         "(not parsed to float) so run directory names match "
                          "exactly what you typed")
     ap.add_argument("--grid-loss", nargs="+",
                     default=GRID_LOSS_DEFAULT,
                     choices=LOSS_CHOICES,
-                    help="fourth sweep axis: defaults to smoothl1, logl1 and "
-                         "hybrid (GRID_LOSS_DEFAULT in this file) - the "
-                         "disparity-space control, the log-space objective "
-                         "aimed at the depth metrics obstacle avoidance "
-                         "actually needs, and their combination (losses.py). "
-                         "depth26 (a faithful port of "
+                    help="fourth sweep axis: defaults to logl1 and hybrid "
+                         "(GRID_LOSS_DEFAULT in this file) - the log-space "
+                         "objective aimed at the depth metrics obstacle "
+                         "avoidance actually needs, and its combination with "
+                         "the original disparity-space smoothl1 term "
+                         "(losses.py). smoothl1 itself is left out now too: "
+                         "it has consistently placed behind logl1/hybrid on "
+                         "depth MAE across every sweep run so far, so the "
+                         "default spends its budget on the two objectives "
+                         "that actually contend for the win. depth26 (a "
+                         "faithful port of "
                          "the loss YOLO26-depth trains with: SILog + "
-                         "multi-scale gradient matching) is left out: every "
-                         "combo tried gave far worse EPE and "
-                         "depth MAE than the other three losses, confirming "
+                         "multi-scale gradient matching) is left out too: "
+                         "every combo tried gave far worse EPE and "
+                         "depth MAE than the other losses, confirming "
                          "its scale-invariant SILog term is the wrong choice "
                          "here, where stereo's fxb already gives true metric "
-                         "scale (losses.py). The same loss(es) are applied to "
+                         "scale (losses.py). Pass `--grid-loss smoothl1 logl1 "
+                         "hybrid` to bring the control back. The same "
+                         "loss(es) are applied to "
                          "every model, so a model comparison is not "
                          "confounded by which objective each one happened to "
-                         "get. Runs using a non-default loss get a "
-                         "'_<loss>' directory suffix. train_loss is not "
-                         "comparable across losses, but val EPE / D1 / depth "
-                         "MAE are.")
+                         "get. Every run gets a '_<loss>' directory suffix. "
+                         "train_loss is not comparable across losses, but "
+                         "val EPE / D1 / depth MAE are.")
     ap.add_argument("--grid-epochs", type=int, default=20,
                     help="epochs per combo in a sweep, kept separate from "
                          "--epochs (which stays long for the real run you do "
@@ -1076,13 +1307,20 @@ def main():
     args = ap.parse_args()
     args.dataset = "tartanair"  # recorded in the checkpoint, as train.py does
 
+    if args.grid_summarize:
+        summarize_grid(args.out)
+        return
+
+    if args.data is None:
+        raise SystemExit("--data is required (unless --grid-summarize)")
+
     if args.grid_search:
         run_grid_search(args)
         return
 
     if args.window is None:
-        args.window = {"temporal": 4, "stereoconv3d": 10,
-                       "stereoconv3d_fast": 3}.get(args.model, 1)
+        args.window = {"siam2d_egomotion_fxb": 4, "c3d_3dhg_10_fxb": 10,
+                       "c3d_3dhg_3_fxb": 3}.get(args.model, 1)
     crop = tuple(int(x) for x in args.crop.split("x")) if args.crop else None
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
