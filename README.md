@@ -21,6 +21,7 @@ This README has two parts:
 | `train.py` | Trains one model on a dataset you collected with `collect_dataset.py`. |
 | `train_tartanair.py` | Trains one model (or many, in a "grid search") on the public TartanAir dataset. |
 | `evaluate.py` | Checks how good a trained model is, and measures how fast it runs. |
+| `eval_all.py` | Batch version of `evaluate.py` for a whole grid-search output folder: health-checks every run (did it finish, does it have a saved model), re-evaluates each one on two held-out data splits, measures inference speed, and flags over/underfitting - one CSV row per run. |
 | `config.py`, `utils_airsim.py`, `json_templates/` | Copied from the drone repo. These start AirSim and read its camera settings. Needed only by `collect_dataset.py` and `debug_depth_capture.py` - the training/evaluation files above never touch them. |
 
 ## Setup
@@ -65,7 +66,7 @@ More detail on all of this - which AirSim worlds are used and why, exactly what 
 
 ## Step 2 - Train a model
 
-Eight models are available. All of them are already built and working - none are just ideas on paper. The [Model Summary](#13-model-summary) section below has the full table with parameter counts; [Sections 6-11](#6-proposed-method---slow-baseline-approach-stereoconvnet) explain how each one actually works.
+Twelve `--model` choices are available: eight base architectures (Sections 6-11), four of which also have an `fxb`-conditioned sibling variant that additionally takes the camera's focal-length x baseline as an input, so one trained model generalises across whatever stereo rig it's given at inference (Section 5 explains which four, and why the other four don't need one). All of them are already built and working - none are just ideas on paper. The [Model Summary](#13-model-summary) section below has the full table with parameter counts; [Sections 6-11](#6-proposed-method---slow-baseline-approach-stereoconvnet) explain how each base architecture actually works.
 
 Train one model on data you collected in Step 1:
 ```bash
@@ -469,6 +470,122 @@ python train.py --model siam2d_3dhg --data ~/datasets/airsim_stereo \
     --out runs/finetune --init runs/tartanair_pre/best.pth
 ```
 
+#### 2.8 Testing `fxb`-conditioning across multiple baselines
+
+Four of this project's models take `fxb` (focal length x baseline) as a
+direct network input instead of only using it at the very last step to turn
+disparity into depth (Section 5's model table: `FastStereoNet`,
+`MobileStereoNet`, `AnyStereoNet`, `YoloStereoNet`, each alongside a plain
+sibling that doesn't; the other four models were built `fxb`-conditioned
+from the start with no plain sibling to compare against). The whole point of
+feeding it in is that **one trained model should stay accurate when handed a
+stereo pair from a rig it never trained on**, as long as it's told that
+rig's `fxb` - not just an accurate model for the one baseline it happened to
+train on. That claim has never actually been tested yet: every sweep run so
+far (Section 15.3) trains and validates a given model on a *single* fixed
+baseline (TartanAir's 0.25 m, Section 2.7, or `settings_dataset.json`'s 6 cm
+real rig, Section 2.2). Testing the actual claim needs the same scene, at
+the same instant, observed through **two or more genuinely different**
+physical baselines, so the only thing that changes between them is the
+disparity geometry - not the scene, not the timing, not anything else.
+
+**Does TartanAir have this?** No. Both versions hardcode a single, fixed
+0.25 m baseline for every trajectory and every one of V2's six camera
+directions (`CALIB_V1`/`CALIB_V2` in
+[stereo_datasets.py](stereo_datasets.py); confirmed independently by
+TartanAir's own paper, which describes twelve synchronized cameras as six
+*directions* each getting one stereo pair, all sharing that same 0.25 m
+separation [[wang2020tartanair]](#16-bibliography)) - not six different
+baselines. `--scale` (Section 2.7) cannot stand in for a real second
+baseline either, even though shrinking the images changes the disparity
+numbers by exactly the same factor a different baseline would
+(`disp = fx*b/depth`, and scaling `fx` by `s` has the identical effect on
+that formula as scaling `b` by `s`): it produces the same scene rendered
+smaller, with the same occlusions and the same matching difficulty at every
+depth, just re-labelled. A genuinely different baseline changes *which*
+points are occluded and how hard they are to match, which is exactly the
+part of the problem `fxb`-conditioning is supposed to help the network
+adapt to. So `--scale` can check that a model doesn't break when handed an
+unfamiliar `fxb` *number*, but it cannot test whether the model is actually
+robust to the different geometry a real second camera produces.
+
+**Could AirSim give us this instead, with more cameras?** Yes - and most of
+the machinery for it is already sitting in this repo, unused.
+`collect_dataset.py`'s `load_cameras()` already treats every camera after
+the first as its own independent right camera, at whatever baseline its
+`X`/`Y`/`Z` offset in the settings file implies, and captures all of them
+together in the same `simGetImages` call every frame (Section 2.3) - so
+every right camera sees the exact same scene at the exact same instant, the
+one property this test actually needs.
+[settings_dataset.json](json_templates/settings_dataset.json) already
+defines **four** right cameras, not just this project's one real rig, each
+commented with a real device it corresponds to:
+
+| Camera | Baseline | Modelled after |
+|---|---|---|
+| `Camera2` | 6.0 cm | This project's real onboard rig (Waveshare/Seeed IMX219-83) |
+| `Camera3` | 9.5 cm | Intel RealSense D455 |
+| `Camera4` | 12 cm | StereoLabs ZED / ZED 2, FLIR Bumblebee2 |
+| `Camera5` | 24 cm | FLIR Bumblebee XB3 (wide-baseline mode) |
+
+Recording a ride with this settings file as-is already produces four
+baselines of the same ride, written to their own
+`right_0060mm/`/`right_0095mm/`/`right_0120mm/`/`right_0240mm/` folders,
+with `calib.json`'s `stereo_pairs[]` already recording each one's measured
+baseline and folder name (Section 2.4) - no changes to `collect_dataset.py`
+at all, just running it.
+
+**The loader-side gap this used to have is now fixed.**
+`AirSimStereoDataset` ([stereo_datasets.py](stereo_datasets.py)) used to read
+a single hardcoded `"right"` folder and expect a flat `calib["baseline_m"]` -
+neither of which the calib.json format above actually produces (it writes
+baseline-suffixed folder names and nests each one's baseline inside
+`stereo_pairs[]`, not at the top level), so training against genuinely
+current `collect_dataset.py` output would fail before this test could even
+start. It now takes a `camera` argument - exposed as `--camera` on both
+`train.py` and `evaluate.py`, the same flag name `TartanAirDataset` already
+uses to pick one of TartanAir's six directional rigs (Section 2.7) - that
+picks which recorded right camera/baseline a run trains or evaluates
+against, by AirSim camera name (`Camera3`) or image folder (`right_0095mm`);
+left unset, it defaults to the first `stereo_pairs` entry, so existing
+single-right-camera recordings need no flag at all.
+
+**The test itself**, now that the loader supports it:
+
+1. Record (or re-record) rides with all four `Camera2`-`Camera5` active.
+2. Train an `fxb`-conditioned model (e.g. `siam2d_3dhg_fxb`) on one baseline
+   only - `--camera` picks one right camera per run, so a single training
+   run never sees more than one baseline's disparities:
+   ```bash
+   python train.py --model siam2d_3dhg_fxb --data ~/datasets/airsim_stereo \
+       --camera Camera2 --out runs/siam2d_3dhg_fxb_camera2
+   ```
+3. Evaluate that same checkpoint on one of the other, held-out baselines'
+   (`Camera3`, `Camera4`, or `Camera5`) stereo pairs, each given its own true
+   `fxb` -
+   scored against the same `DepthPlanar` ground truth every camera in the
+   rig shares, since all four right cameras and the ground-truth depth come
+   from one `simGetImages` call (Section 2.3):
+   ```bash
+   python evaluate.py --ckpt runs/siam2d_3dhg_fxb_camera2/best.pth \
+       --model siam2d_3dhg_fxb --data ~/datasets/airsim_stereo_test --camera Camera3
+   ```
+4. If `fxb`-conditioning works, accuracy on the held-out baseline should
+   land close to the trained-on one. If the model only learned to expect
+   whatever disparity range it was shown in training, held-out accuracy
+   should collapse instead - the failure mode this whole conditioning
+   scheme exists to prevent.
+
+**Status: loader ready, test not yet run.** The `--camera` mechanism that
+steps 2-4 need has been implemented and verified against a synthetic calib.json
+matching `collect_dataset.py`'s real output format - correct baseline/folder
+selection by both camera name and folder name, and a clear error on an
+unknown one - but not yet exercised against a real recording or an actual
+trained checkpoint. No AirSim data has actually been collected with this
+settings file yet either (every completed sweep so far is TartanAir-only,
+Section 15.3), so step 1 above is still the real blocker on running this
+test for real.
+
 ---
 
 ### 3. SoA Paper
@@ -585,13 +702,52 @@ only 22 GFLOPs and 17 ms - the speed counterpart to IGEV-Stereo's accuracy
 record, and the closest recent outside evidence for `FastStereoNet`'s own
 2D/light-3D design (Section 7).
 
-**Discussion.** These five papers cover exactly the two things this project
-cares about: IGEV-Stereo and LightStereo mark the accuracy/speed trade-off
-for *single-frame* stereo, while TemporalStereo, TC-Stereo, and Stereo Any
+**ESMStereo** (Tahmasebi, Huq, Meehan & McAfee, 2025)
+[[tahmasebi2025esmstereo]](#16-bibliography) targets the same real-time/
+accurate trade-off as LightStereo, one year newer: its "Enhanced Shuffle
+Mixer" disparity-upsampling block recovers detail a small-scale cost volume
+would otherwise lose, without paying for a larger one - another data point
+that the accuracy LightStereo/IGEV-Stereo get from a big cost volume can be
+approximated much more cheaply, the same bet `FastStereoNet`'s 1/8-resolution
+matching (Section 7) makes.
+
+**PSKNet** (Liang, Hu, Hu, Xu & Chen, *Knowledge-Based Systems*, 2026)
+[[liang2026psknet]](#16-bibliography) is the newest and most directly
+relevant method found: real-time stereo depth measured **on a Jetson AGX
+Orin**, the same edge-device class this project targets (Section 1.1,
+requirement 1). Its per-pixel kernel-prediction refinement step
+(`Kernel-Aware Residual Enhancer`) is aimed at the same problem
+`FastStereoNet`'s edge-aware refinement stage is (Section 7): sharpen a
+coarse, cheaply-matched disparity map back up using the input image. It has
+no temporal component and does not address blind spots directly, so it
+narrows the "fast/edge-ready" gap in Section 5's table without closing the
+other columns.
+
+**Fast-FoundationStereo** (Wen, Dewan & Birchfield, NVIDIA, 2025-2026)
+[[wen2026fastfoundationstereo]](#16-bibliography) takes the opposite route
+to speed: instead of designing a small network from scratch, it distills,
+searches, and prunes down FoundationStereo (a large zero-shot foundation
+stereo model) until it runs over 10x faster - 21 ms on an RTX 3090 with
+TensorRT - while keeping most of the foundation model's zero-shot accuracy.
+It's the speed-side mirror of Stereo Any Video's approach above (both start
+from a large pretrained model rather than a hand-designed small one), and
+another sign that "shrink a foundation model" is becoming a real alternative
+to "design a small model directly" (this project's own approach, Sections
+6-11) for hitting a real-time budget.
+
+**Discussion.** These eight papers cover exactly the two things this project
+cares about: IGEV-Stereo, LightStereo, ESMStereo, and Fast-FoundationStereo
+mark different points on the accuracy/speed trade-off for *single-frame*
+stereo (the last one via distilling a foundation model rather than designing
+a small one from scratch), while TemporalStereo, TC-Stereo, and Stereo Any
 Video show that frame-to-frame consistency is a real, active research
-direction - but so far nobody has combined that with an edge-device speed
-target, an explicit blind-spot-filling output, or a tested robustness study
-under noisy motion data (Section 5 makes this exact).
+direction. PSKNet is the closest any of them come to this project's actual
+deployment target, having been measured on the same Jetson-class hardware -
+but it, like every other row here, has no temporal-consistency mechanism at
+all. So the gap stands, just more precisely: nobody has combined edge-device
+speed *and* frame-to-frame consistency in the same method, let alone added
+an explicit blind-spot-filling output or a tested robustness study under
+noisy motion data (Section 5 makes this exact).
 
 #### 4.5 List of Method Papers
 
@@ -622,6 +778,9 @@ below are in Section 16.
 - Zeng, Yao, Wu & Jia (2024). [Temporally Consistent Stereo Matching](https://arxiv.org/abs/2407.11950) (TC-Stereo). *ECCV*.
 - Jing, Luo, Mao & Mikolajczyk (2025). [Stereo Any Video: Temporally Consistent Stereo Matching](https://arxiv.org/abs/2503.05549). *ICCV*.
 - Guo et al. (2025). [LightStereo: Channel Boost Is All You Need for Efficient 2D Cost Aggregation](https://arxiv.org/abs/2406.19833). *ICRA*.
+- Tahmasebi, Huq, Meehan & McAfee (2025). [ESMStereo: Enhanced ShuffleMixer Disparity Upsampling for Real-Time and Accurate Stereo Matching](https://arxiv.org/abs/2506.21091). *arXiv preprint*.
+- Liang, Hu, Hu, Xu & Chen (2026). [PSKNet: Lightweight Kernel-Aware Slice Network for Real-Time Stereo Depth Estimation on Edge Devices](https://www.sciencedirect.com/science/article/abs/pii/S0950705126000535). *Knowledge-Based Systems*, 336.
+- Wen, Dewan & Birchfield (2025). [Fast-FoundationStereo: Real-Time Zero-Shot Stereo Matching](https://arxiv.org/abs/2512.11130). *arXiv preprint* (NVIDIA).
 
 **Other referenced methods**
 - Min et al. (2014). [Fast Global Image Smoothing Based on Weighted Least Squares](https://docs.opencv.org/4.x/d9/d51/classcv_1_1ximgproc_1_1DisparityWLSFilter.html). *IEEE TIP* - algorithmic basis of `STEREO_ENHANCE_WLS` (Section 1.1, Section 1.3).
@@ -644,6 +803,7 @@ at once:
 | TemporalStereo / TC-Stereo [[zhang2023temporalstereo, zeng2024tcstereo]](#16-bibliography) | △ | ✓ | ✓ | ✓ | △ | ✓ | ✗ |
 | Stereo Any Video [[jing2025stereoanyvideo]](#16-bibliography) | ✗ | ✓ | ✓ | ✓ | △ | ✓ | △ |
 | LightStereo [[guo2025lightstereo]](#16-bibliography) | ✓ | ✓ | ✓ | ✓ | ✗ | ✗ | ✗ |
+| PSKNet [[liang2026psknet]](#16-bibliography) | ✓✓ (measured on Jetson AGX Orin) | ✓ | ✓ | ✓ | ✗ | ✗ | ✗ |
 | `TempoBandNet` (this repo, existing - Section 11) | ✓ | ✓ | ✓ | ✓ | ✗ | ✓✓ | △ |
 | **Target method (this publication)** | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 
@@ -655,11 +815,16 @@ at once:
 a time and still needs calibration. The single-camera row removes the need
 for calibration but loses real-world scale entirely - not good enough for
 obstacle avoidance (requirement 2). The temporal-stereo row (2023-2025) is
-the newest and closest match, but none of those methods target running on
-small edge hardware, and - checked against what each paper actually claims
-in Section 4.4 - **none of them treat finding and filling blind spots as a
-direct output**, only as something that might happen incidentally as a
-side effect of better matching. This project's own `TempoBandNet` already
+the newest and closest match on consistency, but none of those methods
+target running on small edge hardware, and - checked against what each paper
+actually claims in Section 4.4 - **none of them treat finding and filling
+blind spots as a direct output**, only as something that might happen
+incidentally as a side effect of better matching. PSKNet closes the
+edge-hardware half of that gap on its own (Section 4.4) - it is the one row
+here actually measured on Jetson-class hardware - but it is single-frame
+only, with no temporal-awareness column filled in at all; no method found
+fills both the "fast/edge-ready" and "temporal-aware" columns at once. This
+project's own `TempoBandNet` already
 covers the "fast" and "uses time" columns, but was never built to fill in
 blind spots either (Section 11). Getting a ✓ in every column at once, backed
 by a real test of robustness to noisy motion data and real latency numbers,
@@ -669,45 +834,66 @@ saying the four things the original brief for this project asked for:
 has all clean-up baked into the network, and gives accurate real-world
 depth.**
 
-This project's actual contribution is eight models, all implemented in this
-repository's [models/](models/) folder, that together aim to close the gap
-in the table above (Section 6 `StereoConvNet`, Section 7 `FastStereoNet`,
-the `StereoConv3DNet` pair in Section 8-9, Section 10's single-frame family,
-and Section 11 `TempoBandNet`). All of them train and evaluate the same way
-(Section 15) and can be swapped in with `--model`:
+This project's actual contribution is eight model architectures, all
+implemented in this repository's [models/](models/) folder, that together
+aim to close the gap in the table above (Section 6 `StereoConvNet`, Section
+7 `FastStereoNet`, the `StereoConv3DNet` pair in Section 8-9, Section 10's
+single-frame family, and Section 11 `TempoBandNet`). Four of those eight -
+`FastStereoNet`, `MobileStereoNet`, `AnyStereoNet`, and `YoloStereoNet` -
+also have an `fxb`-conditioned sibling variant: the same architecture,
+additionally given the camera's focal-length x baseline as an input so one
+trained model generalises across whatever stereo rig it's handed at
+inference, instead of only the one baseline it was trained on (see
+`FxbConditioning` in [models/common.py](models/common.py)). The other four
+(`StereoConvNet`, both `StereoConv3DNet` window lengths, `TempoBandNet`)
+don't have a separate sibling because they were already built `fxb`-
+conditioned from the start - there was never a non-conditioned version to
+compare against. Counting the four siblings separately, that is **twelve
+`--model` choices** in total - the full one-row-per-choice breakdown, with
+parameter counts, is Section 13's Model Summary table. All of them train
+and evaluate the same way (Section 15):
 
-| Model | Section | Idea | Params | Status |
-|---|---|---|---|---|
-| `StereoConvNet` | Section 6 | DispNetC-style 2D correlation + U-Net cost aggregation | 3.79 M | implemented |
-| `FastStereoNet` | Section 7 | Group-wise correlation + small 3D-conv hourglass + edge-aware refinement | 0.20 M | implemented |
-| `StereoConv3DNet` | Section 8 | C3D/I3D-style 3D convs over a 10-frame stacked volume | 0.15 M | implemented |
-| `StereoConv3DNet` (`c3d_3dhg_3_fxb`) | Section 9 | Same network, a 3-frame stacked volume instead of 10 | 0.15 M | implemented |
-| `MobileStereoNet` | Section 10.1 | Same pipeline, dense stages as MobileNetV2 inverted residuals | 0.13 M | implemented |
-| `AnyStereoNet` | Section 10.2 | No 3D convs: coarse-to-fine residual disparity bands, anytime output | 0.14 M | implemented |
-| `YoloStereoNet` | Section 10.3 | YOLO26 encoder/neck + multiplicative log-residual decoder | 2.61 M | implemented |
-| `TempoBandNet` | Section 11 | Ego-motion-splatted prior + confidence-gated ConvGRU + narrow-band matching | 0.36 M | implemented |
+| Model | Section | `--model` flag(s) | Idea | Params | Status |
+|---|---|---|---|---|---|
+| `StereoConvNet` | Section 6 | `siam2d_2dun_fxb` | DispNetC-style 2D correlation + U-Net cost aggregation | 3.79 M | implemented |
+| `FastStereoNet` | Section 7 | `siam2d_3dhg` / `siam2d_3dhg_fxb` | Group-wise correlation + small 3D-conv hourglass + edge-aware refinement | 0.20 M | implemented |
+| `StereoConv3DNet` | Section 8 | `c3d_3dhg_10_fxb` | C3D/I3D-style 3D convs over a 10-frame stacked volume | 0.15 M | implemented |
+| `StereoConv3DNet` (T=3) | Section 9 | `c3d_3dhg_3_fxb` | Same network, a 3-frame stacked volume instead of 10 | 0.15 M | implemented |
+| `MobileStereoNet` | Section 10.1 | `mobile2d_3dhg` / `mobile2d_3dhg_fxb` | Same pipeline, dense stages as MobileNetV2 inverted residuals | 0.13 M | implemented |
+| `AnyStereoNet` | Section 10.2 | `pyr2d_casc2d` / `pyr2d_casc2d_fxb` | No 3D convs: coarse-to-fine residual disparity bands, anytime output | 0.14 M | implemented |
+| `YoloStereoNet` | Section 10.3 | `yolo2d_3dhg` / `yolo2d_3dhg_fxb` | YOLO26 encoder/neck + multiplicative log-residual decoder | 2.61 M | implemented |
+| `TempoBandNet` | Section 11 | `siam2d_egomotion_fxb` | Ego-motion-splatted prior + confidence-gated ConvGRU + narrow-band matching | 0.36 M | implemented |
 
-These eight models compare each other in four different ways. `StereoConvNet`
-and `FastStereoNet` are the two single-frame reference points, one slow, one
-fast: same family of ideas (2D matching + a matching-cost network + a smooth
-disparity output), but `StereoConvNet` stays mostly 2D and a few million
-parameters, while `FastStereoNet` moves the clean-up step into a small
-learned 3D piece at a fraction of the size (Section 7 explains the
-trade-off). `MobileStereoNet` and `AnyStereoNet` each remove one of
-`FastStereoNet`'s two most expensive parts (the full-resolution
-convolutions, and the 3D clean-up step), to see how cheap a single-frame
-model can get. `YoloStereoNet` goes the other way, spending far more
-parameters on features to see better at long range, where a 6 cm camera
-baseline gives less than a pixel of disparity. `StereoConv3DNet`'s two
-entries add a simple "just stack frames" temporal axis at two window
+*(where a row lists two flags, the `_fxb` one is the `fxb`-conditioned
+sibling described above - same architecture and parameter count, one extra
+input.)*
+
+These eight architectures compare each other in five different ways.
+`StereoConvNet` and `FastStereoNet` are the two single-frame reference
+points, one slow, one fast: same family of ideas (2D matching + a
+matching-cost network + a smooth disparity output), but `StereoConvNet`
+stays mostly 2D and a few million parameters, while `FastStereoNet` moves
+the clean-up step into a small learned 3D piece at a fraction of the size
+(Section 7 explains the trade-off). `MobileStereoNet` and `AnyStereoNet`
+each remove one of `FastStereoNet`'s two most expensive parts (the
+full-resolution convolutions, and the 3D clean-up step), to see how cheap a
+single-frame model can get. `YoloStereoNet` goes the other way, spending far
+more parameters on features to see better at long range, where a 6 cm
+camera baseline gives less than a pixel of disparity. `StereoConv3DNet`'s
+two entries add a simple "just stack frames" temporal axis at two window
 lengths (10 frames, 3 frames) - the same 0.15M weights either way, since
 window length changes how much compute and memory it uses, not how many
 parameters it has (Section 9). `TempoBandNet` adds the smarter,
 motion-aware temporal axis those two are the simple comparison point for.
-A full results table for this project would report all eight together -
-cheapest and simplest to most capable, on every axis - all trained with the
-same objective, chosen by the test in Section 15.3, so that model choice
-and loss choice are never mixed up with each other.
+And, cutting across all of that, the four `fxb`-conditioned siblings add a
+fifth axis - **does baseline-conditioning let one trained model stand in
+for several rigs**, orthogonal to which architecture it's conditioning; the
+TartanAir grid search (Section 15.3) sweeps every architecture with and
+without it for exactly this reason. A full results table for this project
+would report all twelve `--model` choices together - cheapest and simplest
+to most capable, on every axis - all trained with the same objective,
+chosen by the test in Section 15.3, so that model choice and loss choice
+are never mixed up with each other.
 
 ---
 
@@ -1636,7 +1822,10 @@ away than it does close up.
    [[zhang2023uavstereo, fonder2019midair]](#16-bibliography);
 4. **speed**: half-precision on Jetson (`evaluate.py --bench`), reported
    per model, and for `TempoBandNet`, both a cold start and steady running
-   speed.
+   speed;
+5. **cross-baseline generalization** for the four `fxb`-conditioned models:
+   trained on one camera baseline, evaluated on another it never saw
+   (Section 2.8) - proposed, not yet run.
 
 **Tests that change one piece of `TempoBandNet` at a time**: remove the
 motion-based guess entirely (leaving just `FastStereoNet` plus memory),
@@ -1780,6 +1969,225 @@ placed in zero of the top 10 results by depth MAE. So it was dropped from
 range was extended to check whether 3e-3 was the peak, and the answer
 turned out to be yes.
 
+**Round 1 conclusions: what 197 evaluated configs actually show.** The
+narrative above is the chronological "what was run and why." This is the
+analysis of the result: every run under `runs/tartanair_grid` re-evaluated by
+[eval_all.py](eval_all.py) - held-out-environment accuracy, inference time,
+and an overfit/underfit read of each run's own training curve, one row per
+(model, batch size, lr, loss) in `eval_all.csv` - plus the raw per-epoch
+numbers in each run's `log.csv`. 350 GPU-hours went into the 187 combos that
+actually trained to completion. A caveat before any of it: this entire round
+used the sweep's cheap proxy settings (`--data-fraction 0.3`, 20 epochs,
+Section 15.3's own default), not a full training run - what follows ranks
+configs *relative to each other under that proxy*, which is a different
+claim from ranking their best achievable accuracy.
+
+*Safe, robust results:*
+
+- **Loss**: `logl1` beats `hybrid` in 61 of 66 head-to-head comparisons at
+  matching model/batch-size/lr (median +0.13 m depth MAE, mean +0.23 m) -
+  the single most consistent result in the whole round. Both beat
+  `smoothl1` (n=41, mean 5.61 m vs `logl1`'s 1.55 m) and `depth26` (n=5,
+  mean 3.93 m) by a wide margin, confirming the earlier sweep findings
+  above at full scale rather than on a handful of models.
+- **Architecture**, restricted to `logl1`/`hybrid` only so `depth26` and
+  `smoothl1`'s outliers can't skew it: `siam2d_2dun_fxb` (`StereoConvNet`,
+  Section 6) is the clear winner by *both* best-case (1.29 m) and median
+  (1.38 m) - not a single lucky config, a genuinely better architecture on
+  this data. `siam2d_egomotion_fxb` (`TempoBandNet`) is a solid second
+  (best 1.37 m, median 1.47 m, from fewer tested configs - see the testing
+  issues below). The other ten architectures cluster tightly between 1.48
+  and 1.80 m median, with no further standout; the two `StereoConv3DNet`
+  window lengths (Sections 8-9) tie for the clear bottom - `c3d_3dhg_3_fxb`
+  has the single worst median (1.80 m), `c3d_3dhg_10_fxb` the single worst
+  best-case (1.76 m) - while `c3d_3dhg_10_fxb` alone is also by far the most
+  expensive model to run (37 ms, 5x `siam2d_2dun_fxb`'s 6.8 ms, and 2.7x
+  `c3d_3dhg_3_fxb`'s own 13.8 ms). Section 9's own question - "does
+  stacking raw frames help at all, and how much of its extra cost is worth
+  it" - gets a clean answer here: no, and none.
+- **Learning rate**: `1e-3` and `3e-3` are both solid (mean 1.76 m / 1.67 m,
+  best 1.30 m / 1.29 m); `1e-2` is measurably worse on every statistic
+  (mean 1.90 m, worst outliers, and 8 of the round's 10 outright
+  `overfitting`-flagged runs) - safe to keep excluding from the default
+  grid, now confirmed across the full 12-model roster rather than the
+  smaller set that first flagged it.
+- **`fxb`-conditioning cost**: paired against its plain sibling at matching
+  settings, every conditioned model lands within noise of its sibling
+  (e.g. `siam2d_3dhg` 1.536/1.635 best/median vs `siam2d_3dhg_fxb`
+  1.532/1.633) - taking `fxb` as an input costs nothing measurable on the
+  one baseline this round ever tested it on. Whether it actually *earns*
+  anything - generalizing to a baseline it never trained on - is a
+  completely different, still-untested claim (Section 2.8).
+- **Batch size**: no robust difference. Paired 8-vs-16 at matching
+  model/lr/loss, batch 8 wins the simple count (37 of 63) but the median
+  difference is +0.008 m - indistinguishable from noise at this scale.
+
+**Architecture ranking by robustness, not just peak accuracy.** The
+accuracy numbers above are best-case - the one config out of everything
+tried that worked best. A different, equally useful question: handed this
+architecture at a *random* point in the grid (any batch size, lr, or loss,
+including the ones this round found were bad), how often does it come out
+usable at all? Call a run **good** if its held-out depth MAE on the "same"
+split is at or under 2.0 m - the natural break in the data: every
+`logl1`/`hybrid` config from every architecture lands at or under 1.92 m,
+and the next value up is 2.01 m, where the `smoothl1`/`depth26`/`1e-2`
+failures start. Ranked by the fraction of each architecture's tested
+configs that cleared that bar:
+
+| Rank | Architecture | Good runs | Good % | Best MAE (m) | Median of good (m) | Worst MAE (m) | Median infer (ms) |
+|---|---|---|---|---|---|---|---|
+| 1 | `pyr2d_casc2d_fxb` | 13/15 | 87% | 1.49 | 1.62 | 3.76 | 7.6 |
+| 2 | `yolo2d_3dhg_fxb` | 12/15 | 80% | 1.51 | 1.57 | 4.80 | 8.6 |
+| 3 | `yolo2d_3dhg` | 13/17 | 76% | 1.48 | 1.60 | 8.40 | 8.6 |
+| 3 | `mobile2d_3dhg` | 13/17 | 76% | 1.53 | 1.63 | 15.02 | 7.1 |
+| 5 | `c3d_3dhg_10_fxb` | 11/15 | 73% | 1.76 | 1.78 | 2.93 | 37.2 |
+| 6 | `mobile2d_3dhg_fxb` | 12/17 | 71% | 1.56 | 1.63 | 8.55 | 7.1 |
+| 7 | `pyr2d_casc2d` | 11/16 | 69% | 1.50 | 1.61 | 4.76 | 7.5 |
+| 8 | `siam2d_3dhg_fxb` | 11/17 | 65% | 1.53 | 1.63 | 4.96 | 7.4 |
+| 9 | `siam2d_egomotion_fxb` | 6/11 | 55% | 1.37 | 1.47 | 5.05 | 30.4 |
+| 10 | `c3d_3dhg_3_fxb` | 8/17 | 47% | 1.68 | 1.69 | 7.64 | 13.8 |
+| 11 | `siam2d_3dhg` | 11/25 | 44% | 1.54 | 1.63 | 10.17 | 7.4 |
+| 12 | `siam2d_2dun_fxb` | 6/15 | 40% | **1.29** | 1.30 | **22.96** | 6.8 |
+
+The standout is the tension at the two ends: `siam2d_2dun_fxb` holds both
+the single best accuracy in the entire round *and* the single worst (the
+`smoothl1` divergence detailed in the red flags just below), and ranks dead
+last on robustness as a direct result - it is the architecture most
+sensitive to getting its
+loss/lr picked correctly, not the safest default choice. `pyr2d_casc2d_fxb`
+is the opposite: never the best, never close to the worst, usable under
+almost any loss/lr thrown at it. `siam2d_3dhg` and `siam2d_3dhg_fxb` (44%,
+65%) look worse here than their accuracy numbers alone suggest for exactly
+the exploration-breadth reason flagged in the testing-process issues below
+- `siam2d_3dhg` in particular carries every `depth26` and early `1e-2`
+exploratory run this whole project ever tried (25 configs, more than any
+other architecture), so a chunk of its "bad" count is inherited history,
+not a property of the architecture itself. Read this table alongside the
+accuracy ranking above, not instead of it: one says what the architecture
+can do at its best, this says how much you have to get right to reach it.
+
+*Red flags:*
+
+- **`smoothl1` lets depth MAE drift away from the metric it's actually
+  selected on.** `fit()` saves `best.pth` on `val_epe` improving, never on
+  depth MAE (Section 14/15.1) - fine when the two track together, which
+  `logl1`'s own log.csv shows them doing (depth MAE 1.48 m -> 1.34 m as EPE
+  improves 3.04 -> 2.57 px, epochs 3 -> 19). Under `smoothl1` they can
+  outright diverge: `siam2d_2dun_fxb bs8 lr3e-3 smoothl1` improves EPE
+  every single evaluation (2.85 -> 2.52 px, epoch 3 -> 19) while its depth
+  MAE gets **13x worse over the same epochs** (1.76 m -> 23.30 m) - and
+  because `best.pth` only watches EPE, the checkpoint this run keeps is the
+  epoch with the worst depth MAE it ever had. `mobile2d_3dhg bs16 lr3e-3
+  smoothl1` shows the same shape (2.82 m -> 11.98 m while EPE keeps
+  falling). This isn't "smoothl1 is a worse loss" restated - it's a
+  specific flaw in what `best.pth` means for any disparity-only loss, on
+  top of that.
+- **Held-out environments disagree by metric, not just by model.** Gascola
+  (the "different" split, Section 2.8) is systematically *easier* than
+  SeasonalForestAutumn (the "same" split) by EPE - mean/median about 0.57
+  px lower across all 197 rows - but is a coin flip on depth MAE (lower in
+  94 of 197, median difference +0.02 m). An "it generalizes well" claim
+  that only checks EPE on a new environment could be measuring an easier
+  environment, not a better model.
+- **High learning rates fail in more than one way.** Beyond the `1e-2`
+  configs that simply score worse, two `yolo2d_3dhg`/`yolo2d_3dhg_fxb` runs
+  at `1e-2`/`hybrid` locked in a reasonable `best.pth` early (epoch 11 and
+  3) and then diverged to `NaN` later in the same run (summary.csv's
+  `final_val_epe` for both is literally `nan`) - survivable only because
+  checkpoint selection happened to catch them before the blowup. Several
+  `siam2d_2dun_fxb` runs at `1e-2` (and some at `3e-3`) weren't so lucky:
+  they went `NaN` from epoch 0 and never produced a usable `best.pth` at
+  all. Those run directories have since been deleted as unrecoverable, so
+  they no longer appear in `eval_all.csv` - but they happened, at an
+  8-out-of-8 rate for this architecture at `1e-2`.
+
+*Configs now safe to exclude from future sweeps:*
+
+- `--grid-loss smoothl1 depth26` - already off by default; this round's
+  full-scale numbers (and the divergence red flag above) are a second,
+  stronger confirmation, not a new finding.
+- `--grid-lr 1e-2` - already off by default; same situation, now confirmed
+  across all 12 models instead of the 8 that first flagged it.
+- Both `StereoConv3DNet` window lengths as a priority architecture - between
+  them they hold the worst median (`c3d_3dhg_3_fxb`) and worst best-case
+  (`c3d_3dhg_10_fxb`) accuracy of anything tested, and `c3d_3dhg_10_fxb` is
+  also by far the most expensive model to run; keep both as a documented
+  negative result rather than spend more sweep budget on them.
+- `siam2d_2dun_fxb` + `smoothl1` specifically - the single worst number in
+  the entire dataset (22.96 m) landed on the round's *best* architecture,
+  paired with the one loss already excluded on other grounds. Not a reason
+  to doubt the architecture; a concrete reason never to pair it with
+  `smoothl1` again.
+
+*Must still be tested:*
+
+- **A noise floor.** Zero of the 197 configs share a (model, batch size,
+  lr, loss) with a different seed. The 0.03-0.1 m gaps separating the top
+  5-10 configs could be real or could be exactly the kind of run-to-run
+  variation `set_seed()`'s own docstring (`train_tartanair.py`) warns GPU
+  runs still have, even seeded identically: bilinear interpolate's backward
+  pass and the cost-volume scatter both accumulate with `atomicAdd`, whose
+  summation order isn't fixed run to run. Re-running the top handful of
+  configs at 2-3 extra seeds is cheap and was proposed earlier in this
+  project's own history but never
+  actually run.
+- **`lr=3e-4`** has been tried on exactly one of twelve architectures
+  (`siam2d_2dun_fxb`, where it ties or slightly beats `1e-3`/`3e-3`) -
+  whether going below `1e-3` helps *any other* architecture is completely
+  unknown. Cheapest next experiment: add `3e-4` to the default `--grid-lr`
+  for the other eleven.
+- **The cross-baseline generalization test (Section 2.8)** - the actual
+  reason four architectures carry `fxb` conditioning. This round establishes
+  it's free; it does not establish it works.
+- **Only 2 of TartanAir's 5 environments have ever been a validation
+  target** across all 197 runs: `SeasonalForestAutumn` ("same") and
+  `Gascola` ("different", Section 2.8's `alt_environment_split`, fixed at
+  `--diff-seed 1337`). `AbandonedFactory`, `Downtown`, and `Office` have
+  never been held out once. Every generalization claim in this section
+  rests on a 2-environment sample out of 5 available.
+- **A full, properly-trained run.** 147 of the 197 configs (75%) are
+  flagged `"still improving at cutoff"` by `eval_all.py`'s own
+  `log_csv_fit_stats()` - meaning most of this round's
+  rankings compare models that hadn't finished improving when the 20-epoch
+  budget ran out, concentrated exactly where expected (57/72 at `lr=1e-3`,
+  45/64 at `lr=3e-3` - the lower, still-annealing rates; `overfitting` is
+  instead concentrated at `1e-2`, 8/45). The *relative* ranking above is
+  reasonably trustworthy for that reason - unstable configs failed loudly,
+  stable ones mostly hadn't converged yet in the same direction - but the
+  absolute numbers, and possibly the order of the tightly-clustered middle
+  ten architectures, could still move once the winner is trained properly
+  (the `--data-fraction 1.0`, up to 100 epochs, early-stopping run `report.md`
+  already generates a command for - Section 15.3's `write_report`).
+
+*Issues with the testing process itself:*
+
+- **Uneven exploration breadth per architecture skews any naive "median
+  over all its tested configs" comparison.** `siam2d_3dhg` and
+  `siam2d_egomotion_fxb` were the two models present in the very first,
+  most exploratory sweep (`depth26`, `1e-2`, before either was known to be
+  bad) and so each accumulated more bad-config rows than the other ten
+  architectures added later only under already-pruned defaults. Comparing
+  medians across *all* tested configs (rather than the `logl1`/`hybrid`-only
+  numbers used above) would unfairly penalize exactly the two models that
+  were explored the most thoroughly.
+- **`eval_all.csv`'s own numbers carry a second, independent noise source**
+  on top of training-time variance: each split is capped to
+  `--max-eval-windows` (200 by default) for a tractable full-grid scan,
+  and the dataset is built with `augment=True` (matching how this project's
+  own training/validation has always worked, Section 2.7) - so even
+  re-evaluating the exact same checkpoint twice would give slightly
+  different numbers from the random crop alone, something the top-15
+  table's tight 0.01-0.03 m spreads could already be partly made of.
+- **`avg_infer_ms` in `eval_all.csv` is a batched-GPU number** (default
+  `--eval-bs 8`, run_window on whatever GPU `eval_all.py` ran on), not the
+  single-image, half-precision, target-hardware number Section 1.1's
+  actual requirement cares about. `siam2d_2dun_fxb` (3.79 M params) and
+  `siam2d_3dhg` (0.20 M params) measure almost identically here (6.8 ms vs
+  7.4 ms) despite a 19x parameter gap - a reminder that these numbers say
+  "cost on this GPU, this way of batching" and nothing yet about the
+  Jetson-class edge target `evaluate.py --bench` is built to measure
+  (Section 15.2).
+
 #### 15.4 Command-line reference (`train_tartanair.py`)
 
 `train.py` takes the same core arguments; the TartanAir-specific and sweep
@@ -1788,7 +2196,7 @@ arguments below are unique to `train_tartanair.py`.
 | argument | default | purpose |
 |---|---|---|
 | `--data` | *required* | TartanAir folder(s); finds all trajectories inside automatically |
-| `--model` | `siam2d_3dhg` | `siam2d_3dhg`, `siam2d_2dun_fxb`, `c3d_3dhg_10_fxb`, `c3d_3dhg_3_fxb`, `siam2d_egomotion_fxb`, `mobile2d_3dhg`, `pyr2d_casc2d`, `yolo2d_3dhg` (Sections 6-10) |
+| `--model` | `siam2d_3dhg` | `siam2d_3dhg`, `siam2d_3dhg_fxb`, `siam2d_2dun_fxb`, `c3d_3dhg_10_fxb`, `c3d_3dhg_3_fxb`, `siam2d_egomotion_fxb`, `mobile2d_3dhg`, `mobile2d_3dhg_fxb`, `pyr2d_casc2d`, `pyr2d_casc2d_fxb`, `yolo2d_3dhg`, `yolo2d_3dhg_fxb` (Sections 6-10, Section 13's table has the flag-to-architecture mapping) |
 | `--loss` | `smoothl1` | `smoothl1`, `depth26`, `logl1`, `hybrid` (Section 14) |
 | `--loss-w-log`, `--loss-w-grad` | 1.0, 0.5 | how much weight to give the log-space term and the edge-matching term |
 | `--loss-silog-lambda` | 1.0 | how scale-invariant `depth26` is; 0.0 keeps absolute scale instead |
@@ -1807,7 +2215,7 @@ arguments below are unique to `train_tartanair.py`.
 | `--resume` / `--init` | none | continue a run (weights + optimiser + epoch) / start from these weights only |
 | `--out`, `--log-dir` | `runs/tartanair`, `logs` | where this run is saved; folder collecting one log file per run |
 | `--grid-search` | off | turn on the sweep described in Section 15.3 |
-| `--grid-models`, `--grid-bs`, `--grid-lr`, `--grid-loss` | 8 models, `8 16`, `1e-3 3e-3`, `smoothl1 logl1 hybrid` | the four things the sweep tries every combination of (Section 15.3); `yolo2d_3dhg` is on by default because of the first sweep's result, `depth26` and `1e-2` are off by default because later sweeps measured them and found them clearly worse (pass either explicitly to include it anyway) |
+| `--grid-models`, `--grid-bs`, `--grid-lr`, `--grid-loss` | all 12 `--model` choices, `8 16`, `1e-3 3e-3`, `logl1 hybrid` | the four things the sweep tries every combination of (Section 15.3); `depth26` and `smoothl1` are off by default because sweeps measured them and found them clearly worse (pass either explicitly to include it anyway) |
 | `--grid-epochs` | 10 | epochs per combination, kept separate from `--epochs` |
 | `--grid-force-rerun` | off | redo combinations an earlier sweep already finished |
 | `--no-tensorboard`, `--tensorboard-port` | on, 6006 | the training dashboard for the sweep |
@@ -2107,6 +2515,37 @@ Grouped by section; every entry includes a BibTeX record and a URL.
   eprint    = {2406.19833},
   archivePrefix = {arXiv},
   url       = {https://arxiv.org/abs/2406.19833}
+}
+
+@article{tahmasebi2025esmstereo,
+  title   = {ESMStereo: Enhanced ShuffleMixer Disparity Upsampling for Real-Time and Accurate Stereo Matching},
+  author  = {Tahmasebi, Mahmoud and Huq, Saif and Meehan, Kevin and McAfee, Marion},
+  journal = {arXiv preprint},
+  year    = {2025},
+  eprint  = {2506.21091},
+  archivePrefix = {arXiv},
+  url     = {https://arxiv.org/abs/2506.21091}
+}
+
+@article{liang2026psknet,
+  title   = {PSKNet: Lightweight Kernel-Aware Slice Network for Real-Time Stereo Depth Estimation on Edge Devices},
+  author  = {Liang, Bifa and Hu, Ziyang and Hu, Haifeng and Xu, Jianming and Chen, Dihu},
+  journal = {Knowledge-Based Systems},
+  volume  = {336},
+  year    = {2026},
+  url     = {https://www.sciencedirect.com/science/article/abs/pii/S0950705126000535},
+  note    = {Measured on Jetson AGX Orin - the same edge-device class this project targets (Section 1.1)}
+}
+
+@article{wen2026fastfoundationstereo,
+  title   = {Fast-FoundationStereo: Real-Time Zero-Shot Stereo Matching},
+  author  = {Wen, Bowen and Dewan, Shaurya and Birchfield, Stan},
+  journal = {arXiv preprint},
+  year    = {2025},
+  eprint  = {2512.11130},
+  archivePrefix = {arXiv},
+  url     = {https://arxiv.org/abs/2512.11130},
+  note    = {NVIDIA; distills/prunes FoundationStereo to 21 ms on an RTX 3090 with TensorRT}
 }
 ```
 

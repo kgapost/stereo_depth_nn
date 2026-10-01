@@ -163,9 +163,24 @@ class _StereoSequenceDataset(Dataset):
 
 
 class AirSimStereoDataset(_StereoSequenceDataset):
-    """Sequences recorded by collect_dataset.py under one or more roots."""
+    """Sequences recorded by collect_dataset.py under one or more roots.
 
-    def __init__(self, roots, **kw):
+    `collect_dataset.py` writes one calib.json per sequence with a
+    `stereo_pairs` list - one entry per right camera actually configured in
+    the settings file it was recorded with (`{"camera", "dir", "baseline_m",
+    ...}`, `dir` being that camera's own `right_<baseline_mm>mm/` image
+    folder, README Section 2.4) - since `settings_dataset.json` ships four
+    right cameras at four different real-rig baselines by default (README
+    Section 2.8), not just one.
+
+    `camera` picks which of those recorded baselines this dataset trains or
+    evaluates against, matched against either the AirSim camera name
+    (`"Camera2"`) or its image folder (`"right_0060mm"`); the default, None,
+    takes the first `stereo_pairs` entry, so a single-right-camera recording
+    (or a caller that doesn't care) needs no flag at all.
+    """
+
+    def __init__(self, roots, camera=None, **kw):
         super().__init__(**kw)
         if isinstance(roots, (str, os.PathLike)):
             roots = [roots]
@@ -183,6 +198,7 @@ class AirSimStereoDataset(_StereoSequenceDataset):
         for d in seq_dirs:
             with open(os.path.join(d, "calib.json")) as f:
                 calib = json.load(f)
+            pair = self._select_stereo_pair(calib, camera, d)
             poses = {}
             with open(os.path.join(d, "poses.csv")) as f:
                 for row in csv.DictReader(f):
@@ -193,14 +209,38 @@ class AirSimStereoDataset(_StereoSequenceDataset):
             frames = sorted(int(os.path.splitext(os.path.basename(p))[0])
                             for p in glob.glob(os.path.join(d, "depth", "*.npy")))
             frames = [i for i in frames if i in poses]
-            self.sequences.append({"dir": d, "frames": frames, "calib": calib,
+            # calib.json's baseline lives inside `pair`, per right camera, not
+            # at the top level - flatten the chosen one in so the shared
+            # __getitem__ (calib["fx"] * calib["baseline_m"]) can read it the
+            # same way it does TartanAir's single-baseline calib dict.
+            seq_calib = dict(calib, baseline_m=pair["baseline_m"])
+            self.sequences.append({"dir": d, "frames": frames, "calib": seq_calib,
+                                   "right_dir": pair["dir"],
                                    "poses": [poses[i] for i in frames]})
         self._build_index()
+
+    @staticmethod
+    def _select_stereo_pair(calib, camera, seq_dir):
+        pairs = calib.get("stereo_pairs")
+        if not pairs:
+            raise ValueError(
+                f"{seq_dir}/calib.json has no 'stereo_pairs' entries - nothing "
+                "to read a right camera/baseline from")
+        if camera is None:
+            return pairs[0]
+        pair = next((p for p in pairs
+                    if camera in (p.get("camera"), p.get("dir"))), None)
+        if pair is None:
+            available = [(p.get("camera"), p.get("dir")) for p in pairs]
+            raise ValueError(
+                f"--camera {camera!r} not found in {seq_dir}/calib.json; "
+                f"available (camera, dir) pairs: {available}")
+        return pair
 
     def _load_frame(self, seq, i):
         name = f"{seq['frames'][i]:06d}"
         left = cv2.imread(os.path.join(seq["dir"], "left", name + ".png"))
-        right = cv2.imread(os.path.join(seq["dir"], "right", name + ".png"))
+        right = cv2.imread(os.path.join(seq["dir"], seq["right_dir"], name + ".png"))
         depth = np.load(os.path.join(seq["dir"], "depth", name + ".npy"))
         return left, right, depth
 

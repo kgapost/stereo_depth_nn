@@ -129,6 +129,13 @@ def main():
                          "match the scale --ckpt was trained with")
     ap.add_argument("--data", nargs="+", default=None)
     ap.add_argument("--dataset", default="airsim", choices=["airsim", "tartanair"])
+    ap.add_argument("--camera", default=None,
+                    help="--dataset airsim: which recorded right camera/baseline "
+                         "to evaluate on, by AirSim camera name (e.g. Camera2) or "
+                         "image folder (e.g. right_0060mm) - default: the first "
+                         "one in calib.json's stereo_pairs (README Section 2.8, "
+                         "the cross-baseline generalization test). --dataset "
+                         "tartanair: which of the six camera rigs (default front)")
     ap.add_argument("--window", type=int, default=None,
                     help="window length for siam2d_egomotion_fxb/c3d_3dhg_*_fxb "
                          "evaluation (default: 8 siam2d_egomotion_fxb, 10 "
@@ -157,9 +164,11 @@ def main():
     if args.data:
         window = args.window if args.model in (
             "siam2d_egomotion_fxb", "c3d_3dhg_10_fxb", "c3d_3dhg_3_fxb") else 1
-        ds = build_dataset(args.dataset, args.data, window=window,
-                           frame_stride=1, window_stride=window,
-                           augment=False, max_disp=args.max_disp)
+        ds_kw = dict(window=window, frame_stride=1, window_stride=window,
+                    augment=False, max_disp=args.max_disp)
+        if args.camera is not None:
+            ds_kw["camera"] = args.camera
+        ds = build_dataset(args.dataset, args.data, **ds_kw)
         loader = DataLoader(ds, batch_size=args.bs, num_workers=4)
         print(f"evaluating on {len(ds)} windows from {len(ds.sequences)} sequences")
         evaluate(model, loader, args, device)

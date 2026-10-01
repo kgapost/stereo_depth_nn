@@ -332,6 +332,13 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--data", nargs="+", required=True)
     ap.add_argument("--dataset", default="airsim", choices=["airsim", "tartanair"])
+    ap.add_argument("--camera", default=None,
+                    help="--dataset airsim: which recorded right camera/baseline "
+                         "to use, by AirSim camera name (e.g. Camera2) or image "
+                         "folder (e.g. right_0060mm) - default: the first one in "
+                         "calib.json's stereo_pairs (README Section 2.8). "
+                         "--dataset tartanair: which of the six camera rigs "
+                         "(default front, see TartanAirDataset)")
     ap.add_argument("--model", default="siam2d_3dhg",
                     choices=["siam2d_3dhg", "siam2d_2dun_fxb", "c3d_3dhg_10_fxb",
                             "c3d_3dhg_3_fxb", "siam2d_egomotion_fxb", "mobile2d_3dhg",
@@ -390,9 +397,11 @@ def main():
     os.makedirs(args.out, exist_ok=True)
 
     try:
-        dataset = build_dataset(args.dataset, args.data, window=args.window,
-                                frame_stride=args.frame_stride, crop=crop,
-                                augment=True, max_disp=args.max_disp)
+        dataset_kw = dict(window=args.window, frame_stride=args.frame_stride,
+                          crop=crop, augment=True, max_disp=args.max_disp)
+        if args.camera is not None:
+            dataset_kw["camera"] = args.camera
+        dataset = build_dataset(args.dataset, args.data, **dataset_kw)
         train_set, val_set = sequence_split(dataset, args.val_frac)
         print(f"{len(dataset.sequences)} sequences -> {len(train_set)} train / "
               f"{len(val_set)} val windows (window={args.window})")
