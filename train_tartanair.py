@@ -94,17 +94,31 @@ MODEL_CHOICES = ["siam2d_3dhg", "siam2d_3dhg_fxb", "siam2d_2dun_fxb",
                  "c3d_3dhg_10_fxb", "c3d_3dhg_3_fxb", "siam2d_egomotion_fxb",
                  "mobile2d_3dhg", "mobile2d_3dhg_fxb", "pyr2d_casc2d",
                  "pyr2d_casc2d_fxb", "yolo2d_3dhg", "yolo2d_3dhg_fxb"]
+# The first full 197-config round (README Section 15.3, "Round 1
+# conclusions") found the plain/`fxb` sibling pairs statistically
+# indistinguishable on accuracy (`fxb` costs nothing measurable), so the
+# default sweep now only spends budget on the `fxb` side of each pair -
+# plus the four architectures that were always `fxb`-conditioned with no
+# plain sibling to begin with. `StereoConv3DNet` (both window lengths) is
+# dropped entirely: worst median and worst best-case accuracy of all twelve,
+# and `c3d_3dhg_10_fxb` is also by far the most expensive to run (Section
+# 15.3's robustness table). Pass `--grid-models` explicitly (e.g. with the
+# plain siblings, or either `c3d_3dhg_*_fxb`) to bring any of them back.
+GRID_MODELS_DEFAULT = ["siam2d_2dun_fxb", "siam2d_3dhg_fxb",
+                       "siam2d_egomotion_fxb", "mobile2d_3dhg_fxb",
+                       "pyr2d_casc2d_fxb", "yolo2d_3dhg_fxb"]
 # depth26 and smoothl1 stay valid --loss/--grid-loss choices (LOSS_CHOICES,
-# losses.py), but neither is swept by default any more. depth26: every combo
-# tried so far gave far worse EPE and depth MAE than the other losses (its
-# SILog term is scale-invariant, the wrong choice when stereo's fxb already
-# gives true metric scale - see losses.py and PAPER.md Section 14). smoothl1:
-# the disparity-space control has consistently placed behind the log-space
-# losses across every sweep run so far, so the default sweep spends its
-# budget on the two objectives that actually contend for the win. Pass
-# `--grid-loss ... depth26` or `... smoothl1` explicitly to include either
-# again.
-GRID_LOSS_DEFAULT = [l for l in LOSS_CHOICES if l not in ("depth26", "smoothl1")]
+# losses.py), but neither is swept by default any more - depth26's
+# scale-invariant SILog term is the wrong choice when stereo's fxb already
+# gives true metric scale (losses.py, Section 14), and smoothl1 has
+# consistently placed behind the log-space losses across every sweep run.
+# `hybrid` is off by default too now: Round 1 (Section 15.3) found `logl1`
+# beat it in 61 of 66 head-to-head comparisons at matching model/bs/lr
+# (median +0.13 m depth MAE), the single most consistent result of the
+# round, so the default sweep no longer spends budget confirming it again.
+# Pass `--grid-loss ... depth26`/`smoothl1`/`hybrid` explicitly to include
+# any of them anyway.
+GRID_LOSS_DEFAULT = ["logl1"]
 DEFAULT_LOSS = "smoothl1"
 
 
@@ -1208,10 +1222,12 @@ def main():
                          "--data. For when summary.csv has fallen out of sync "
                          "with the directories on disk - e.g. "
                          "`--grid-summarize --out runs/tartanair_grid`.")
-    ap.add_argument("--grid-models", nargs="+", default=MODEL_CHOICES,
+    ap.add_argument("--grid-models", nargs="+", default=GRID_MODELS_DEFAULT,
                     choices=MODEL_CHOICES,
-                    help="default is all twelve models, yolo2d_3dhg included. "
-                         "The '_fxb' variants (siam2d_3dhg_fxb, "
+                    help="default is six models (GRID_MODELS_DEFAULT in this "
+                         "file): the 'fxb' side of every plain/fxb sibling "
+                         "pair, plus the four architectures that were always "
+                         "fxb-conditioned. The '_fxb' variants (siam2d_3dhg_fxb, "
                          "mobile2d_3dhg_fxb, pyr2d_casc2d_fxb, "
                          "yolo2d_3dhg_fxb) additionally take fxb (focal "
                          "x baseline) as a network input, conditioning the "
@@ -1220,13 +1236,22 @@ def main():
                          "stereo baseline it is given at inference - the "
                          "same idea siam2d_2dun_fxb/c3d_3dhg_10_fxb/"
                          "siam2d_egomotion_fxb already "
-                         "use (see models/common.py FxbConditioning). "
-                         "yolo2d_3dhg and yolo2d_3dhg_fxb need ultralytics "
-                         "installed (imported lazily, only for these "
-                         "models); pass --grid-models without them to "
-                         "exclude it, e.g. on a machine without that "
-                         "dependency")
-    ap.add_argument("--grid-bs", nargs="+", type=int, default=[8, 16],
+                         "use (see models/common.py FxbConditioning). Round 1 "
+                         "(README Section 15.3) found the plain/fxb pairs "
+                         "statistically indistinguishable on accuracy, so the "
+                         "plain siblings (siam2d_3dhg, mobile2d_3dhg, "
+                         "pyr2d_casc2d, yolo2d_3dhg) and both StereoConv3DNet "
+                         "window lengths (c3d_3dhg_10_fxb/c3d_3dhg_3_fxb - "
+                         "worst median and worst best-case accuracy of all "
+                         "twelve, c3d_3dhg_10_fxb also by far the most "
+                         "expensive to run) are off by default now. Pass "
+                         "--grid-models explicitly, with any of MODEL_CHOICES, "
+                         "to bring any of them back - e.g. all twelve again, "
+                         "or just the plain siblings to re-check the fxb-cost "
+                         "finding on a different dataset. yolo2d_3dhg and "
+                         "yolo2d_3dhg_fxb need ultralytics installed (imported "
+                         "lazily, only for these models).")
+    ap.add_argument("--grid-bs", nargs="+", type=int, default=[8],
                     help="ascending, so the cheapest (and least OOM-prone) "
                          "combos report first. Measured peak VRAM at 480x640 "
                          "with --amp: siam2d_3dhg/pyr2d_casc2d ~2.7/5.5/11GB, "
@@ -1234,48 +1259,65 @@ def main():
                          "~11/22.5GB and OOM at 32 (its window=4 backprop is "
                          "~4x the activations); yolo2d_3dhg 3.1GB at bs=8 "
                          "measured, so ~6/12GB at 16/32 on the linear scaling "
-                         "the other rows show. Defaults to both 8 and 16: the "
-                         "bs{8,16} sweep (runs/tartanair_grid) has bs=8 combos "
-                         "(siam2d_egomotion_fxb, yolo2d_3dhg, pyr2d_casc2d) "
-                         "placing well up the top-10 by depth MAE too, so "
-                         "bs=16-only would trade away real completeness for "
-                         "speed. Pass "
-                         "`--grid-bs 16` for just the cheaper half.")
-    ap.add_argument("--grid-lr", nargs="+", default=["1e-3", "3e-3"],
-                    help="defaults to 1e-3 and 3e-3. An earlier lr sweep "
+                         "the other rows show. Defaults to 8 only now: Round 1 "
+                         "(README Section 15.3) found no robust accuracy "
+                         "difference between 8 and 16 across 63 paired "
+                         "comparisons (median difference 0.008 m depth MAE), "
+                         "and 8 is the one size every architecture actually "
+                         "fits at with the log-space losses - siam2d_egomotion_fxb "
+                         "is VRAM-infeasible at bs=16 with logl1/hybrid on a "
+                         "24GB GPU (sweep.log: '~25.3GB needed > 23.0GB "
+                         "budget'), so a bs=16-only default would silently "
+                         "drop it from every future sweep. Pass `--grid-bs 16` "
+                         "or `8 16` to test larger batches explicitly.")
+    ap.add_argument("--grid-lr", nargs="+", default=["1e-3"],
+                    help="defaults to 1e-3 only. An earlier lr sweep "
                          "(runs/tartanair_grid) tried 3e-4/1e-3/3e-3/1e-2 and "
                          "1e-2 came back with the worst average EPE and depth "
                          "MAE of the rates tried and zero top-10 results by "
-                         "depth MAE, so it was dropped; 3e-4 was never "
-                         "competitive either. 3e-3 and 1e-3 have since swapped "
-                         "places more than once as the model/bs/loss axes grew "
-                         "(the bs{8,16} sweep put 3e-3 combos in most of the "
-                         "top 10 by depth MAE), so both stay in the default "
-                         "rather than picking one. Kept as literal strings "
-                         "(not parsed to float) so run directory names match "
-                         "exactly what you typed")
+                         "depth MAE, so it was dropped. Round 1's full "
+                         "197-config analysis (README Section 15.3) found "
+                         "1e-3 and 3e-3 close enough to be within noise of "
+                         "each other (3e-3 even had a marginally lower mean), "
+                         "so this is a judgment call, not a clear win: 1e-3 "
+                         "was kept as the single default for being the more "
+                         "conservative, more-tested rate, and because 3e-4 - "
+                         "lower still, tried on only one architecture so far "
+                         "- was at least as good there, suggesting the real "
+                         "optimum may sit below 1e-3 rather than above it. "
+                         "Pass `--grid-lr 1e-3 3e-3` (or add 3e-4) to check "
+                         "that on more architectures. Kept as a literal "
+                         "string (not parsed to float) so run directory names "
+                         "match exactly what you typed")
     ap.add_argument("--grid-loss", nargs="+",
                     default=GRID_LOSS_DEFAULT,
                     choices=LOSS_CHOICES,
-                    help="fourth sweep axis: defaults to logl1 and hybrid "
+                    help="fourth sweep axis: defaults to logl1 only "
                          "(GRID_LOSS_DEFAULT in this file) - the log-space "
                          "objective aimed at the depth metrics obstacle "
-                         "avoidance actually needs, and its combination with "
-                         "the original disparity-space smoothl1 term "
-                         "(losses.py). smoothl1 itself is left out now too: "
-                         "it has consistently placed behind logl1/hybrid on "
-                         "depth MAE across every sweep run so far, so the "
-                         "default spends its budget on the two objectives "
-                         "that actually contend for the win. depth26 (a "
-                         "faithful port of "
-                         "the loss YOLO26-depth trains with: SILog + "
+                         "avoidance actually needs. hybrid is off by default "
+                         "now too: Round 1's full 197-config analysis (README "
+                         "Section 15.3) found logl1 beat it in 61 of 66 "
+                         "head-to-head comparisons at matching model/bs/lr "
+                         "(median +0.13 m depth MAE), the single most "
+                         "consistent result of the round, so the default "
+                         "sweep no longer spends budget re-confirming it. "
+                         "smoothl1 is left out for the same reason it always "
+                         "has been - it has consistently placed behind the "
+                         "log-space losses, and Round 1 found a specific "
+                         "failure mode on top of that: it can let depth MAE "
+                         "drift arbitrarily far from val_epe (the metric "
+                         "best.pth is actually selected on), including one "
+                         "run where depth MAE got 13x worse while EPE kept "
+                         "improving the whole time. depth26 (a faithful port "
+                         "of the loss YOLO26-depth trains with: SILog + "
                          "multi-scale gradient matching) is left out too: "
                          "every combo tried gave far worse EPE and "
                          "depth MAE than the other losses, confirming "
                          "its scale-invariant SILog term is the wrong choice "
                          "here, where stereo's fxb already gives true metric "
                          "scale (losses.py). Pass `--grid-loss smoothl1 logl1 "
-                         "hybrid` to bring the control back. The same "
+                         "hybrid depth26` to bring any of them back. The same "
                          "loss(es) are applied to "
                          "every model, so a model comparison is not "
                          "confounded by which objective each one happened to "

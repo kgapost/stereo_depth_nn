@@ -2188,6 +2188,55 @@ can do at its best, this says how much you have to get right to reach it.
   Jetson-class edge target `evaluate.py --bench` is built to measure
   (Section 15.2).
 
+**Round 1 changes: the defaults going forward.** Four of the conclusions
+above were acted on, the same way the earlier `depth26`/`1e-2` findings in
+this section were - by changing what the sweep tries by default, not just
+writing the finding down:
+
+- **`--grid-loss` defaults to `logl1` only now**, not `logl1 hybrid`. The
+  61-of-66 head-to-head result above is the single most consistent finding
+  of the round; the default sweep no longer spends budget re-confirming it.
+  `smoothl1`/`depth26`/`hybrid` are still available, explicitly.
+- **`--grid-bs` defaults to `8` only now**, not `8 16`. The round found no
+  robust accuracy difference between the two (median difference 0.008 m),
+  and 8 is the one size every architecture actually fits in - `16` is
+  VRAM-infeasible for `siam2d_egomotion_fxb` with the log-space losses on a
+  24GB GPU, so defaulting to `16` alone would have silently dropped the
+  round's #2 architecture from every future sweep. `16` stays available
+  explicitly for the architectures that do fit it.
+- **`--grid-lr` defaults to `1e-3` only now**, not `1e-3 3e-3`. This one is
+  a judgment call more than a clean win: `1e-3` and `3e-3` were close enough
+  to be within noise of each other (`3e-3` even had a marginally lower
+  mean), so either default would have been defensible. `1e-3` was kept for
+  being the more conservative, more-tested rate, and because `3e-4` -
+  lower still, but tried on only one architecture so far - did at least as
+  well there, suggesting the real optimum may sit below `1e-3` rather than
+  above it (the "must still be tested" list above).
+- **`--grid-models` defaults to six architectures now**, not twelve. Every
+  plain/`fxb` sibling pair tested statistically indistinguishable on
+  accuracy, so the default now only spends budget on the `fxb` side of each
+  pair (`fxb`-conditioning is free, and only the `fxb` side can generalize
+  across baselines at all, Section 2.8) - dropping `siam2d_3dhg`,
+  `mobile2d_3dhg`, `pyr2d_casc2d`, `yolo2d_3dhg` from the default, keeping
+  their `_fxb` counterparts. Both `StereoConv3DNet` window lengths
+  (`c3d_3dhg_10_fxb`, `c3d_3dhg_3_fxb`) are dropped entirely - not for being
+  `fxb`-conditioned-only (the other three always-`fxb` architectures stay),
+  but on their own merits: worst median and worst best-case accuracy of all
+  twelve between them, and `c3d_3dhg_10_fxb` is also by far the most
+  expensive model to run. That's two architectures excluded on direct
+  evidence; a third wasn't found. The weakest of the remaining six,
+  `mobile2d_3dhg_fxb`, is also the cheapest model in the entire round to run
+  (7.1 ms) - it stays by design, as the "how cheap can it get" comparison
+  point Section 10.1 exists for, not despite being the weakest performer.
+  The default is now `siam2d_2dun_fxb`, `siam2d_3dhg_fxb`,
+  `siam2d_egomotion_fxb`, `mobile2d_3dhg_fxb`, `pyr2d_casc2d_fxb`,
+  `yolo2d_3dhg_fxb`. All twelve stay available via an explicit
+  `--grid-models`, and a result worth re-checking before trusting these
+  defaults indefinitely: Round 1 ran on TartanAir only, at `--data-fraction
+  0.3`, so a sibling or `StereoConv3DNet` pulling ahead on a full training
+  run or a different dataset would be grounds to revisit every exclusion
+  here, not just add it as a footnote.
+
 #### 15.4 Command-line reference (`train_tartanair.py`)
 
 `train.py` takes the same core arguments; the TartanAir-specific and sweep
@@ -2215,7 +2264,7 @@ arguments below are unique to `train_tartanair.py`.
 | `--resume` / `--init` | none | continue a run (weights + optimiser + epoch) / start from these weights only |
 | `--out`, `--log-dir` | `runs/tartanair`, `logs` | where this run is saved; folder collecting one log file per run |
 | `--grid-search` | off | turn on the sweep described in Section 15.3 |
-| `--grid-models`, `--grid-bs`, `--grid-lr`, `--grid-loss` | all 12 `--model` choices, `8 16`, `1e-3 3e-3`, `logl1 hybrid` | the four things the sweep tries every combination of (Section 15.3); `depth26` and `smoothl1` are off by default because sweeps measured them and found them clearly worse (pass either explicitly to include it anyway) |
+| `--grid-models`, `--grid-bs`, `--grid-lr`, `--grid-loss` | 6 of 12 `--model` choices (`GRID_MODELS_DEFAULT`), `8`, `1e-3`, `logl1` | the four things the sweep tries every combination of (Section 15.3); each default was narrowed to one or a few values after Round 1 measured the others clearly worse or statistically indistinguishable (pass any of them explicitly to bring a dropped value back - see "Round 1 changes" above) |
 | `--grid-epochs` | 10 | epochs per combination, kept separate from `--epochs` |
 | `--grid-force-rerun` | off | redo combinations an earlier sweep already finished |
 | `--no-tensorboard`, `--tensorboard-port` | on, 6006 | the training dashboard for the sweep |
