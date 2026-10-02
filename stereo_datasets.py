@@ -293,11 +293,19 @@ class TartanAirDataset(_StereoSequenceDataset):
     CALIB = CALIB_V1  # backwards-compatible alias
 
     def __init__(self, roots, camera="front", difficulty=None, envs=None,
-                 scale=1.0, **kw):
+                 exclude_envs=None, scale=1.0, **kw):
+        """`exclude_envs` drops whole environments before they ever reach
+        `environment_split()` (train_tartanair.py) - for an environment
+        that must never appear in train or val, e.g. a held-out test
+        environment (README Section 2.1/15.3), as opposed to `envs`, which
+        instead restricts to only the named environments. Both can be
+        combined (`envs` picks a subset, `exclude_envs` then drops some of
+        that subset), though the common case uses only one or the other."""
         super().__init__(**kw)
         if isinstance(roots, (str, os.PathLike)):
             roots = [roots]
         keep_envs = set(envs) if envs else None
+        drop_envs = set(exclude_envs) if exclude_envs else None
 
         traj = []
         for root in roots:
@@ -311,6 +319,8 @@ class TartanAirDataset(_StereoSequenceDataset):
                 continue
             env = self._env_of(d)
             if keep_envs is not None and env not in keep_envs:
+                continue
+            if drop_envs is not None and env in drop_envs:
                 continue
 
             if ver == 2:

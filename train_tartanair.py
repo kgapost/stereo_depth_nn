@@ -120,6 +120,9 @@ GRID_MODELS_DEFAULT = ["siam2d_2dun_fxb", "siam2d_3dhg_fxb",
 # any of them anyway.
 GRID_LOSS_DEFAULT = ["logl1"]
 DEFAULT_LOSS = "smoothl1"
+# Held out of train/val entirely by default (--test-envs) - see that flag's
+# help text for why Ocean specifically.
+TEST_ENV_DEFAULT = "Ocean"
 
 
 def environment_split(dataset, val_frac, val_envs=None):
@@ -247,6 +250,7 @@ _GRID_PASSTHROUGH_ARGS = [
     ("envs", "--envs", "list"),
     ("val_envs", "--val-envs", "list"),
     ("val_frac", "--val-frac", "value"),
+    ("test_envs", "--test-envs", "list"),
     ("pose_noise", "--pose-noise", "value"),
     ("pose_noise_trans", "--pose-noise-trans", "value"),
     ("workers", "--workers", "value"),
@@ -1147,6 +1151,28 @@ def main():
                     help="hold out these environments (default: last --val-frac)")
     ap.add_argument("--val-frac", type=float, default=0.15,
                     help="fraction of *environments* held out for validation")
+    ap.add_argument("--test-envs", nargs="*", default=[TEST_ENV_DEFAULT],
+                    help=f"environment(s) excluded entirely - never in train, "
+                         f"never in val, via TartanAirDataset's exclude_envs - "
+                         f"so they stay a genuine final test set instead of "
+                         f"something --val-frac already picked a model against "
+                         f"(README Section 2.1/15.3). Defaults to "
+                         f"['{TEST_ENV_DEFAULT}'], chosen as the most "
+                         f"challenging of the environments in use: open water "
+                         f"is close to a worst case for stereo matching - "
+                         f"near-textureless and specular, exactly the "
+                         f"'blind spot' failure mode Section 1.2 describes, "
+                         f"as opposed to the forest/urban/office scenes "
+                         f"already in --data. Not an empirical ranking across "
+                         f"all environments (no model has been evaluated "
+                         f"against most of them yet, Section 15.3) - a "
+                         f"deliberate choice of the hardest case available, "
+                         f"the same way the AirSim environment table (Section "
+                         f"2.1) picks LandscapeMountains/ZhangJiajie for "
+                         f"their specific failure modes rather than ranking "
+                         f"all seven. Pass `--test-envs` (with no values) to "
+                         f"disable and use every environment for train/val "
+                         f"again.")
     ap.add_argument("--pose-noise", type=float, default=0.0,
                     help="train-time rotation noise on rel poses, deg "
                          "(siam2d_egomotion_fxb)")
@@ -1188,13 +1214,16 @@ def main():
                          "some ops these models use (bilinear interpolate "
                          "backward, the cost-volume scatter) have no "
                          "deterministic CUDA kernel and will raise instead.")
-    ap.add_argument("--data-fraction", type=float, default=0.3,
+    ap.add_argument("--data-fraction", type=float, default=0.5,
                     help="train and validate on this deterministic fraction "
-                         "(0-1] of each split. Defaults to 0.3 to keep sweeps "
-                         "tractable; pass --data-fraction 1.0 for the "
-                         "full-length run on the config a sweep picks, or an "
-                         "explicit --max-train-windows/--max-val-windows to "
-                         "give either half an absolute count instead.")
+                         "(0-1] of each split. Defaults to 0.5 (raised from "
+                         "0.3 after Round 1, README Section 15.3, found most "
+                         "configs still improving at the old 0.3/20-epoch "
+                         "cutoff) to keep sweeps tractable; pass "
+                         "--data-fraction 1.0 for the full-length run on the "
+                         "config a sweep picks, or an explicit "
+                         "--max-train-windows/--max-val-windows to give "
+                         "either half an absolute count instead.")
     ap.add_argument("--max-train-windows", type=int, default=None,
                     help="cap the training set to N windows, randomly "
                          "subsampled with a fixed seed so every run in a grid "
@@ -1324,10 +1353,13 @@ def main():
                          "get. Every run gets a '_<loss>' directory suffix. "
                          "train_loss is not comparable across losses, but "
                          "val EPE / D1 / depth MAE are.")
-    ap.add_argument("--grid-epochs", type=int, default=20,
+    ap.add_argument("--grid-epochs", type=int, default=40,
                     help="epochs per combo in a sweep, kept separate from "
                          "--epochs (which stays long for the real run you do "
-                         "once the sweep has picked a winner)")
+                         "once the sweep has picked a winner). Raised from 20 "
+                         "after Round 1 (README Section 15.3) found 75%% of "
+                         "configs still improving when the old 20-epoch "
+                         "budget ran out.")
     ap.add_argument("--final-epochs", type=int, default=100,
                     help="epochs in the follow-up command the report prints "
                          "for training the winning config on all the data")
@@ -1376,9 +1408,13 @@ def main():
     try:
         dataset = TartanAirDataset(args.data, camera=args.camera,
                                    difficulty=args.difficulty, envs=args.envs,
+                                   exclude_envs=args.test_envs,
                                    scale=args.scale, window=args.window,
                                    frame_stride=args.frame_stride, crop=crop,
                                    augment=True, max_disp=args.max_disp)
+        if args.test_envs:
+            print(f"test environment(s) excluded from train/val entirely: "
+                 f"{args.test_envs}")
         if crop is not None:
             w, h = dataset.sequences[0]["size"]
             if crop[0] > h or crop[1] > w:

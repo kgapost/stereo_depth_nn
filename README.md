@@ -448,6 +448,28 @@ instead holds out entire environments (`--val-envs`, or the last
 `--val-frac` of them), and only falls back to splitting by sequence if just
 one environment is available.
 
+**One environment is held out of training and validation entirely, as a
+genuine final test set.** `--test-envs` (default `['Ocean']`) is passed as
+`exclude_envs` to `TartanAirDataset`, which drops those environments before
+`environment_split()` ever sees them - not a third slice of the same pool
+`--val-frac` already picks from, a scene no sweep, no checkpoint, and no
+early-stopping decision has ever been allowed to see. **`Ocean`** was added
+specifically for this, and specifically because it's a deliberately hard
+case for stereo: open water is close to the worst-case input this project's
+own blind-spot discussion describes (Section 1.2) - near-textureless, and
+specular rather than diffuse, so the same patch of water looks different
+from the left and right camera in a way that has nothing to do with depth,
+exactly the kind of surface block matching (and, potentially, a learned
+matcher) can fail on. This is a deliberate choice of the hardest case
+available, not a measured ranking across the six environments now in
+`--data` - no model has been evaluated against four of the other five yet
+either (Section 15.3), so there is no existing difficulty ordering to rank
+`Ocean` against, only the same reasoning the AirSim environment table
+(Section 2.1) already uses to pick `LandscapeMountains`/`ZhangJiajie` for
+their specific failure modes rather than a measured "hardest of seven."
+Pass `--test-envs` with no values to disable this and use every environment
+for train/val again, as before.
+
 **The mismatch with the real camera must be kept in mind for any result
 from TartanAir.** Its 0.25 m baseline gives about 80 px·m of "disparity
 budget", against roughly 23 px·m for this project's 6.3 cm rig - TartanAir
@@ -2237,6 +2259,45 @@ writing the finding down:
   run or a different dataset would be grounds to revisit every exclusion
   here, not just add it as a footnote.
 
+**Round 2 setup: a real held-out test environment, and a longer budget.**
+Two more changes went in alongside the default narrowing above, addressing
+two items from Round 1's own "must still be tested" list: `--data-fraction`
+is now 0.5 (was 0.3) and `--grid-epochs` is 40 (was 20), since 75% of Round
+1's configs were still improving when the old budget ran out. And `--test-envs`
+(Section 2.7) now holds `Ocean` out of train/val entirely by default - a
+sixth TartanAir environment, added specifically as a genuine final test set
+rather than folded into the training pool, since every held-out split
+Round 1 ever used (`SeasonalForestAutumn`, `Gascola`) had already influenced
+a sweep decision somewhere.
+
+Because `Ocean` is excluded rather than added to the pool, the train/val
+data available to the six default architectures is unchanged from Round 1
+(still `AbandonedFactory`/`Downtown`/`Gascola`/`Office` for train,
+`SeasonalForestAutumn` for val, 65,522 windows total) - only
+`--data-fraction` and `--grid-epochs` make this round more expensive than
+Round 1. Projected from each architecture's own measured Round 1 time at
+these settings (`bs=8, lr=1e-3, logl1` - the actual new defaults - scaled by
+the exact `0.5/0.3` window-count ratio and `40/20` epoch ratio, no guessing
+involved since the environment pool itself doesn't change):
+
+| model | Round 1 (20 epochs, 0.3 fraction) | Round 2 projected (40 epochs, 0.5 fraction) |
+|---|---|---|
+| `siam2d_2dun_fxb` | 1.28 h | 4.27 h |
+| `siam2d_3dhg_fxb` | 1.54 h | 5.13 h |
+| `siam2d_egomotion_fxb` | 4.75 h | 15.84 h |
+| `mobile2d_3dhg_fxb` | 1.55 h | 5.16 h |
+| `pyr2d_casc2d_fxb` | 1.73 h | 5.76 h |
+| `yolo2d_3dhg_fxb` | 2.07 h | 6.90 h |
+| **total (sequential)** | **13.3 h** | **~43.1 h (~1.8 days)** |
+
+`siam2d_egomotion_fxb` alone is still ~37% of the total, same as Round 1 -
+raising the epoch budget and data fraction scales every architecture by the
+same factor, so it doesn't change which one dominates the wall clock. This
+does not include a final test-set pass over `Ocean` once training finishes
+(`evaluate.py --dataset tartanair --envs Ocean`, a single forward pass per
+checkpoint, not a training cost) - cheap relative to the training time
+above, but worth budgeting for separately when actually running this.
+
 #### 15.4 Command-line reference (`train_tartanair.py`)
 
 `train.py` takes the same core arguments; the TartanAir-specific and sweep
@@ -2256,16 +2317,18 @@ arguments below are unique to `train_tartanair.py`.
 | `--camera` | `front` | which V2 camera rig to use; only `front` is checked against this project's pose convention |
 | `--difficulty`, `--envs` | both, all | limit to `Data_easy`/`Data_hard`, or to specific named environments |
 | `--val-envs`, `--val-frac` | last 15% | which environments are held out for validation (Section 2.7) |
+| `--test-envs` | `['Ocean']` | environment(s) excluded from train *and* val entirely, as a genuine final test set (Section 2.7); pass with no values to disable |
+| `--data-fraction` | 0.5 | deterministic fraction of train/val actually used; raised from 0.3 after Round 1 found most configs still improving at the old 20-epoch/0.3 cutoff (Section 15.3) |
 | `--window`, `--frame-stride` | model-dependent, 1 | how many frames per window (1 single-frame, 4 `siam2d_egomotion_fxb`, 10 `c3d_3dhg_10_fxb`, 3 `c3d_3dhg_3_fxb`) and the gap between them |
 | `--pose-noise`, `--pose-noise-trans` | 0.0, 0.02 | how much fake motion-sensor noise to add during training (`siam2d_egomotion_fxb`) |
-| `--max-train-windows`, `--max-val-windows` | 1500, 1000 | cap on how much data each sweep cell uses, so cells are comparable |
-| `--eval-every`, `--print-every` | 2, 10 | how often to validate; how often to print progress |
-| `--amp`, `--workers` | off, 4 | mixed precision; number of data-loading workers |
+| `--max-train-windows`, `--max-val-windows` | none, none | absolute window-count cap, overriding `--data-fraction` for either half if set |
+| `--eval-every`, `--print-every` | 4, 10 | how often to validate; how often to print progress |
+| `--amp`, `--workers` | off, 8 | mixed precision; number of data-loading workers |
 | `--resume` / `--init` | none | continue a run (weights + optimiser + epoch) / start from these weights only |
 | `--out`, `--log-dir` | `runs/tartanair`, `logs` | where this run is saved; folder collecting one log file per run |
 | `--grid-search` | off | turn on the sweep described in Section 15.3 |
 | `--grid-models`, `--grid-bs`, `--grid-lr`, `--grid-loss` | 6 of 12 `--model` choices (`GRID_MODELS_DEFAULT`), `8`, `1e-3`, `logl1` | the four things the sweep tries every combination of (Section 15.3); each default was narrowed to one or a few values after Round 1 measured the others clearly worse or statistically indistinguishable (pass any of them explicitly to bring a dropped value back - see "Round 1 changes" above) |
-| `--grid-epochs` | 10 | epochs per combination, kept separate from `--epochs` |
+| `--grid-epochs` | 40 | epochs per combination, kept separate from `--epochs`; raised from 20 for the same reason as `--data-fraction` above |
 | `--grid-force-rerun` | off | redo combinations an earlier sweep already finished |
 | `--no-tensorboard`, `--tensorboard-port` | on, 6006 | the training dashboard for the sweep |
 
