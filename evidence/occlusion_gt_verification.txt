@@ -1,0 +1,38 @@
+Blind-spot ground-truth verification
+generated: 2026-11-24T15:48:55+00:00
+command: scripts/verify_occlusion_gt.py --frames 40  (120 frames, 3 envs)
+matcher: OpenCV 5.0.0 StereoSGBM, blockSize 5, numDisparities 128, SGBM_3WAY
+
+verifying on 120 frames from 3 environments
+
+
+=== 1. forward-warp vs left-right-consistency occlusion ===
+  IoU                     mean 0.5825   min 0.2869
+  occluded frac (warp)    mean 6.22%
+  occluded frac (LR)      mean 7.25%
+
+=== 2. blind-spot coverage (share of valid pixels) ===
+  occluded         9.12%   (min  0.34  max 30.59)
+  out_of_frame     2.55%   (min  0.63  max  7.57)
+  textureless      1.99%   (min  0.00  max 14.57)
+  any             13.65%   (min  3.33  max 31.73)
+
+=== 3. SGBM disparity error by category (the acid test) ===
+  category          MAE px    p90 px  matcher ret   px/frame
+  matchable          0.632     0.864        79.2%     303814
+  occluded           5.135    12.840        60.0%      29699
+  out_of_frame         n/a       n/a         0.0%       8842
+  textureless        0.907     1.370        61.6%       7744
+
+=== 4. SGBM error by exclusive structure-tensor bin ===
+  (base: matcher returned, unoccluded, in-frame -- so this isolates
+   texture from the geometric channels)
+  lambda_min range            MAE px    share   vs base
+  [0e+00, 1e-07)               4.455     0.1%     6.99x
+  [1e-07, 1e-06)               0.607     1.8%     0.95x
+  [1e-06, 1e-05)               0.378    14.2%     0.59x
+  [1e-05, 1e-04)               0.372    18.6%     0.58x
+  [1e-04, 1e-03)               0.544    33.9%     0.85x
+  [1e-03, 1e-02)               0.991    30.9%     1.56x
+  [1e-02, inf)                 1.142     0.6%     1.79x
+  (base overall)               0.637   100.0%     1.00x
