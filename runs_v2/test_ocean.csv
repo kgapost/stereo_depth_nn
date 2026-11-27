@@ -1,0 +1,13 @@
+model,run,ckpt,env,epe,d1,depth_mae,n,infer_ms
+mobile2d_3dhg_fxb,mobile2d_3dhg_fxb_bs8_lr1e-3_logl1,best,Ocean,1.1807,7.0111,1.2235,9804,7.17
+mobile2d_3dhg_fxb,mobile2d_3dhg_fxb_bs8_lr1e-3_logl1,last,Ocean,1.3450,8.0122,1.2990,9804,7.13
+pyr2d_casc2d_fxb,pyr2d_casc2d_fxb_bs8_lr1e-3_logl1,best,Ocean,5.2192,19.9817,2.3192,9804,7.60
+pyr2d_casc2d_fxb,pyr2d_casc2d_fxb_bs8_lr1e-3_logl1,last,Ocean,4.6335,18.9319,2.1751,9804,7.74
+siam2d_2dun_fxb,siam2d_2dun_fxb_bs8_lr1e-3_logl1,best,Ocean,0.6469,2.9376,0.8049,9804,6.93
+siam2d_2dun_fxb,siam2d_2dun_fxb_bs8_lr1e-3_logl1,last,Ocean,0.6461,2.8890,0.7872,9804,6.99
+siam2d_3dhg_fxb,siam2d_3dhg_fxb_bs8_lr1e-3_logl1,best,Ocean,1.5437,6.3451,1.1180,9804,7.60
+siam2d_3dhg_fxb,siam2d_3dhg_fxb_bs8_lr1e-3_logl1,last,Ocean,1.4700,6.3326,1.1312,9804,7.62
+siam2d_egomotion_fxb,siam2d_egomotion_fxb_bs8_lr1e-3_logl1,best,Ocean,1.0014,5.7575,0.9525,4892,30.95
+siam2d_egomotion_fxb,siam2d_egomotion_fxb_bs8_lr1e-3_logl1,last,Ocean,1.2280,6.5989,1.1046,4892,31.17
+yolo2d_3dhg_fxb,yolo2d_3dhg_fxb_bs8_lr1e-3_logl1,best,Ocean,0.9185,4.5436,0.9783,9804,8.84
+yolo2d_3dhg_fxb,yolo2d_3dhg_fxb_bs8_lr1e-3_logl1,last,Ocean,0.9190,4.6446,0.9845,9804,8.95

@@ -1,0 +1,7 @@
+model,batch_size,lr,loss,status,best_val_epe,best_epoch,final_val_epe,best_val_depth_mae,seconds,avg_infer_ms
+siam2d_2dun_fxb,8,1e-3,logl1,OK,2.2298,31,2.2487,1.1832,14660,11.2
+siam2d_3dhg_fxb,8,1e-3,logl1,OK,2.8649,35,2.8667,1.4869,18383,11.5
+mobile2d_3dhg_fxb,8,1e-3,logl1,OK,2.8079,19,2.8203,1.5159,18346,10.2
+pyr2d_casc2d_fxb,8,1e-3,logl1,OK,3.0796,31,3.1045,1.4287,19787,10.7
+yolo2d_3dhg_fxb,8,1e-3,logl1,OK,2.7369,31,2.7787,1.4396,23972,11.2
+siam2d_egomotion_fxb,8,1e-3,logl1,OK,2.5790,35,2.6830,1.3000,65007,122.2
