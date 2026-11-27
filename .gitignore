@@ -15,6 +15,22 @@ logs/
 *.pt
 *.onnx
 
+# Raw training chatter. These are console progress bars rewritten with \r, so
+# they run to megabytes (runs_v2/sweep.log alone is 6.4 MB, each stdout.log
+# 1.2 MB) while saying nothing the committed log.csv, summary.csv and report.md
+# do not already state. The results are versioned; the noise is not. Read them
+# with `tr '\r' '\n' < f | tail`, never by tailing directly.
+*.log
+events.out.tfevents.*
+nohup.out
+
+# Queue bookkeeping written by run_round3.sh -- machine-local by nature. A
+# .queue_done committed here would tell a fresh clone that a run it does not
+# have is already finished, and .queue.lock is held by a live process.
+.queue.lock
+.queue_done
+.queue_attempts
+
 # ===== Datasets (recorded or downloaded - never commit these) =====
 *.npy
 *.npz
